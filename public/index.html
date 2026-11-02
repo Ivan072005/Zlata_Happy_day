@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>English Bot · Панель</title>
+  <meta name="description" content="Панель преподавателя: ученики, занятия и статистика">
+  <meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111318" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="English Bot">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="appbar" id="appbar">
+    <button class="icon-btn" id="back" hidden aria-label="Назад"></button>
+    <h1 id="title">English Bot</h1>
+    <div id="appbar-action"></div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <nav class="tabbar" id="tabbar">
+    <a href="#/" data-tab="home"><span data-icon="home"></span><span>Главная</span></a>
+    <a href="#/students" data-tab="students"><span data-icon="users"></span><span>Ученики</span></a>
+    <a href="#/topics" data-tab="topics"><span data-icon="book"></span><span>Темы</span></a>
+    <a href="#/settings" data-tab="settings"><span data-icon="gear"></span><span>Настройки</span></a>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
