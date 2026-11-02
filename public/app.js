@@ -931,6 +931,26 @@ function insertLine(lines, items, day, start, text) {
   lines.push('', DAY_NAMES[day], text);
 }
 
+/**
+ * Поставить урок в день: если время попадает в свободное окно — занять его (остаток окна останется свободным),
+ * иначе просто вставить строку по времени. `skipLine` — строка, которую не трогаем (старое место урока).
+ */
+function placeLesson(lines, items, day, startMin, durMin, lessonText, skipLine = null) {
+  const endMin = startMin + durMin;
+  const win = items.find(
+    (i) => i.day === day && i.kind === 'free' && i.line !== skipLine && toMinutesStr(i.start) <= startMin && toMinutesStr(i.end) >= endMin,
+  );
+  if (win) {
+    const parts = [];
+    if (startMin > toMinutesStr(win.start)) parts.push(formatLine({ kind: 'free', start: win.start, end: fromMinutesStr(startMin) }));
+    parts.push(lessonText);
+    if (endMin < toMinutesStr(win.end)) parts.push(formatLine({ kind: 'free', start: fromMinutesStr(endMin), end: win.end }));
+    lines.splice(win.line - 1, 1, ...parts);
+    return;
+  }
+  insertLine(lines, items, day, fromMinutesStr(startMin), lessonText);
+}
+
 function studentsDatalist() {
   return `<datalist id="students-dl">${schedStudents.map((s) => `<option value="${esc(s.name)}">`).join('')}</datalist>`;
 }
@@ -966,7 +986,7 @@ function openLessonItem(d, it) {
     `${DAY_NAMES[it.day]}, ${it.start}`,
     `${it.cancelled ? '' : `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>${esc(it.name)}</b>${itemPayBadge(d, it)}</div>`}
     <form id="f-item" class="${it.cancelled ? '' : 'mt'}">
-      ${lessonFields(it)}
+      ${lessonFields(it, { withDay: true })}
       <div class="switch-row" style="padding-top:0"><div><b>Отменён</b><small>Отменённый урок не считается и не оплачивается</small></div>
         <label class="switch"><input type="checkbox" name="cancelled" ${it.cancelled ? 'checked' : ''}><span></span></label></div>
       <button class="btn block big mt" type="submit">Сохранить</button>
@@ -980,7 +1000,34 @@ function openLessonItem(d, it) {
     </div>`,
   );
   onSubmit($('#f-item', el), async (f) => {
-    await saveWeekLines(d, (lines) => (lines[it.line - 1] = lineFromForm(f, { cancelled: !!f.cancelled })));
+    const day = Number(f.day);
+    const start = f.start.slice(0, 5);
+    const moved = day !== it.day || start !== it.start;
+    await saveWeekLines(
+      d,
+      (lines) => {
+        const text = lineFromForm(f, { cancelled: !!f.cancelled });
+        if (!moved) {
+          lines[it.line - 1] = text;
+          return;
+        }
+        // Переставили: на новое место (заняв свободное окно, если оно там есть), старое место — свободно.
+        // Сначала правим строки ниже, чтобы номера строк выше не сдвинулись.
+        const freeOld = formatLine({ kind: 'free', start: it.start, end: it.end });
+        const target = d.items.find(
+          (i) => i.day === day && i.kind === 'free' && toMinutesStr(i.start) <= toMinutesStr(start) && toMinutesStr(i.end) >= toMinutesStr(start) + Number(f.dur),
+        );
+        const targetLine = target ? target.line : (d.items.filter((i) => i.day === day && toMinutesStr(i.start) <= toMinutesStr(start)).pop()?.line ?? 0) + 0.5;
+        if (targetLine > it.line) {
+          placeLesson(lines, d.items, day, toMinutesStr(start), Number(f.dur), text, it.line);
+          lines[it.line - 1] = freeOld;
+        } else {
+          lines[it.line - 1] = freeOld;
+          placeLesson(lines, d.items, day, toMinutesStr(start), Number(f.dur), text, it.line);
+        }
+      },
+      moved ? `${it.name}: ${DAY_NAMES[day]}, ${start} ✓` : 'Сохранено ✓',
+    );
     close();
   });
   el.addEventListener('click', async (e) => {
