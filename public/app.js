@@ -1130,7 +1130,7 @@ async function pageSchedule(week) {
   schedStudents = st.students.filter((s) => !s.archived);
   setHeader({
     title: 'Расписание',
-    action: `<a class="btn secondary" style="min-height:38px;padding:6px 12px" href="#/template">📋 Постоянный</a>`,
+    action: `<a class="btn secondary" style="min-height:38px;padding:6px 12px" href="#/template">📋 Постоянный график</a>`,
   });
   setFab('Урок', () => openAddItem(d));
 
@@ -1264,7 +1264,7 @@ async function pageTextEditor(mode, week = null) {
     }
     <div class="editor-bar">
       <button class="btn secondary" id="toggle-edit">✏️ Редактировать текстом</button>
-      <a class="link-btn" href="${isWeek ? `#/schedule/${week}` : '#/schedule'}">Расписание →</a>
+      <a class="btn ghost" href="${isWeek ? `#/schedule/${week}` : '#/schedule'}">📅 Недельный график</a>
     </div>
     <div id="editor">
     <details class="card help mt" ${text ? '' : 'open'}>
