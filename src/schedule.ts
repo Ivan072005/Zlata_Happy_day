@@ -3,6 +3,7 @@ import { parseSchedule } from '../public/parser.js';
 import type { Env } from './types';
 import { addWeeks, slotMs, weekKeyOf, weekRange } from './time';
 
+
 export interface Slot {
   day: number;
   start: string;
@@ -76,9 +77,11 @@ export async function ensureWeek(env: Env, week: string): Promise<void> {
   if (done) return;
   const tpl = await getTemplate(env);
   if (!tpl) return;
+  const first = await env.DB.prepare('SELECT MIN(created_at) AS t FROM templates').first<{ t: number }>();
+  const startFrom = weekRange(weekKeyOf(first!.t))[0];
   const [, end] = weekRange(week);
-  if (end <= tpl.created_at) return; // неделя целиком до появления графика — не выдумываем прошлые уроки
-  await generate(env, week, parse(tpl.text).items, tpl.created_at, await studentMap(env));
+  if (end <= startFrom) return; // недели до начала работы с графиком — не выдумываем прошлые уроки
+  await generate(env, week, parse(tpl.text).items, startFrom, await studentMap(env));
 }
 
 /**
@@ -100,14 +103,18 @@ export async function saveTemplate(env: Env, text: string): Promise<{ created: s
   }
 
   // 2. Сохранить версию графика
+  const first = await env.DB.prepare('SELECT MIN(created_at) AS t FROM templates').first<{ t: number | null }>();
   await env.DB.prepare('INSERT INTO templates (text, created_at) VALUES (?, ?)').bind(text, now).run();
+  // В первую неделю работы с графиком заполняем неделю целиком (уроки с начала недели тоже были)
+  const firstWeek = weekKeyOf(first?.t ?? now);
+  const fillFrom = firstWeek === weekKeyOf(now) ? weekRange(firstWeek)[0] : now;
 
   // 3. Удалить будущие автоматические уроки и создать заново по новому графику
   await env.DB.prepare("DELETE FROM classes WHERE starts_at > ? AND manual = 0 AND edited = 0 AND status = 'planned'").bind(now).run();
   const thisWeek = weekKeyOf(now);
   const { results: weeks } = await env.DB.prepare('SELECT week FROM class_weeks WHERE week >= ?').bind(thisWeek).all<{ week: string }>();
   const toGen = new Set([thisWeek, ...weeks.map((w) => w.week)]);
-  for (const w of toGen) await generate(env, w, items, now, students);
+  for (const w of toGen) await generate(env, w, items, w === thisWeek ? fillFrom : now, students);
 
   return { created, lessons: items.filter((i) => i.kind === 'lesson').length };
 }

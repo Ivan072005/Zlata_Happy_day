@@ -977,6 +977,15 @@ async function openAddClass(defaults = {}) {
   });
 }
 
+/** Свободное окно / занятое время из графика. */
+function slotRow(s) {
+  const long = toMinutesStr(s.end) - toMinutesStr(s.start) > 60;
+  const label = s.kind === 'free' ? (long ? `свободно до ${s.end}` : 'свободно') : `занято до ${s.end}`;
+  return `<div class="row sched slot ${s.kind}"><div class="sched-time"><b>${s.start}</b></div>
+    <div class="row-main"><div class="row-sub">${label}</div></div></div>`;
+}
+const toMinutesStr = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+
 // ───────── Расписание (реальные уроки) ─────────
 async function pageSchedule(week) {
   const d = await api(`/week${week ? `?week=${week}` : ''}`);
@@ -1017,13 +1026,20 @@ async function pageSchedule(week) {
     const next = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i + 1);
     const cls = d.classes.filter((c) => c.starts_at >= day.getTime() && c.starts_at < next.getTime());
     // Свободные окна и занятое время из графика (только для текущей и будущих недель)
-    const extra = d.week >= d.current ? d.slots.filter((s) => s.day === i) : [];
+    const nowMs = Date.now();
+    const extra =
+      d.week >= d.current
+        ? d.slots.filter((s) => {
+            if (s.day !== i) return false;
+            const [eh, em] = s.end.split(':').map(Number);
+            return new Date(day.getFullYear(), day.getMonth(), day.getDate(), eh, em).getTime() > nowMs; // прошедшие окна не показываем
+          })
+        : [];
     const entries = [
       ...cls.map((c) => ({ t: fmtTime(c.starts_at), html: classRow(c) })),
       ...extra.map((s) => ({
         t: s.start,
-        html: `<div class="row sched slot ${s.kind}"><div class="sched-time"><b>${s.start}</b><span>${s.kind === 'busy' ? s.end : ''}</span></div>
-          <div class="row-main"><div class="row-sub">${s.kind === 'free' ? 'свободно' : 'занято'}</div></div></div>`,
+        html: slotRow(s),
       })),
     ].sort((a, b) => a.t.localeCompare(b.t));
     const isToday = day.toDateString() === todayKey;
@@ -1063,7 +1079,7 @@ async function pageTemplate() {
           <li><code>Понедельник</code> — день недели</li>
           <li><code>10:00 Мария 350</code> — урок: время, имя, цена</li>
           <li><code>11:00</code> — свободное окно</li>
-          <li><code>9:00 — 12:00</code> — занято</li>
+          <li><code>9:00 — 12:00</code> — свободное время; <code>9:00 — 12:00 занято</code> — занято</li>
           <li>Одно имя = один ученик. Разных с одинаковым именем пиши с буквой: <code>София К.</code></li>
         </ul>
         Новые имена станут учениками автоматически.</div>
@@ -1100,9 +1116,11 @@ async function pageTemplate() {
       if (!items.length) continue;
       h += `<div class="section-title day"><span>${DAY_NAMES[d]}</span></div><div class="list">${items
         .map(
-          (i) => `<div class="row sched slot ${i.kind}"><div class="sched-time"><b>${i.start}</b><span>${i.end}</span></div>
-          <div class="row-main">${i.kind === 'lesson' ? `<div class="row-title">${esc(i.name)}</div>` : `<div class="row-sub">${i.kind === 'free' ? 'свободно' : 'занято'}</div>`}</div>
-          <div class="row-end">${i.kind === 'lesson' ? money(i.price) : ''}</div></div>`,
+          (i) =>
+            i.kind === 'lesson'
+              ? `<div class="row sched"><div class="sched-time"><b>${i.start}</b><span>${i.end}</span></div>
+          <div class="row-main"><div class="row-title">${esc(i.name)}</div></div><div class="row-end">${money(i.price)}</div></div>`
+              : slotRow(i),
         )
         .join('')}</div>`;
     }

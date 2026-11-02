@@ -6,7 +6,8 @@
 //   10:00 Мария 350          ← урок: время, имя, цена
 //   10:00-11:30 Мария 500    ← урок с временем окончания
 //   11:00                    ← свободное окно
-//   9:00 — 12:00             ← занято / нерабочее время
+//   9:00 — 12:00             ← свободное время с 9 до 12
+//   9:00 — 12:00 занято      ← занято / нерабочее время (слова: занято, перерыв, выходной, нерабочее)
 // Пустые строки, заголовки и значки в начале строки (|, -, •, >) игнорируются.
 
 const DAYS = [
@@ -70,17 +71,15 @@ export function parseSchedule(text, defaultMinutes = 60) {
       return;
     }
     const rest = m[5].trim();
+    const busy = /^(занято|занята|перерыв|выходной|нерабочее|не работаю|busy|off)\b/i.test(rest);
 
-    if (!rest) {
-      if (endRaw) {
-        if (toMinutes(endRaw) <= toMinutes(start)) {
-          errors.push({ line, text: raw, message: 'Конец должен быть позже начала' });
-          return;
-        }
-        items.push({ day, start, end: endRaw, kind: 'busy', line });
-      } else {
-        items.push({ day, start, end: fromMinutes(toMinutes(start) + defaultMinutes), kind: 'free', line });
+    if (!rest || busy) {
+      const end = endRaw ?? fromMinutes(toMinutes(start) + defaultMinutes);
+      if (toMinutes(end) <= toMinutes(start)) {
+        errors.push({ line, text: raw, message: 'Конец должен быть позже начала' });
+        return;
       }
+      items.push({ day, start, end, kind: busy ? 'busy' : 'free', line });
       return;
     }
 

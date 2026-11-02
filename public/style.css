@@ -376,3 +376,6 @@ textarea.tpl {
   padding: 8px; border-radius: 18px; background: color-mix(in srgb, var(--bg) 85%, transparent);
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
 }
+
+.stats.three .stat-value { font-size: clamp(15px, 4.8vw, 20px); white-space: nowrap; }
+.stats.three .stat { min-width: 0; overflow: hidden; }
