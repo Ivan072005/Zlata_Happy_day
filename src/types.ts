@@ -48,6 +48,7 @@ export interface Lesson {
   closes_at: number;
   min_messages: number;
   notified: number;
+  paid: number;
   created_at: number;
 }
 

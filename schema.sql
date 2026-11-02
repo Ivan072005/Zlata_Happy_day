@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS lessons (
   closes_at INTEGER NOT NULL,
   min_messages INTEGER NOT NULL DEFAULT 10,    -- минимум сообщений для зачёта
   notified INTEGER NOT NULL DEFAULT 0,
+  paid INTEGER NOT NULL DEFAULT 0,             -- отметка преподавателя: оплачено
   created_at INTEGER NOT NULL
 );
 

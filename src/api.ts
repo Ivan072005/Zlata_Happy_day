@@ -114,7 +114,7 @@ const withStatus = (rows: LessonRow[], t = Date.now()) => rows.map((l) => ({ ...
 
 route('GET', '/dashboard', async (env) => {
   const t = Date.now();
-  const [open, upcoming, recent, recentLessons, counts] = await Promise.all([
+  const [open, upcoming, recent, recentLessons, counts, unpaid] = await Promise.all([
     env.DB.prepare(`${LESSON_SELECT} WHERE l.opens_at <= ?1 AND l.closes_at > ?1 AND st.archived = 0 ORDER BY l.closes_at`).bind(t).all<LessonRow>(),
     env.DB.prepare(`${LESSON_SELECT} WHERE l.opens_at > ?1 AND l.opens_at < ?2 AND st.archived = 0 ORDER BY l.opens_at LIMIT 30`)
       .bind(t, t + 2 * DAY)
@@ -136,12 +136,19 @@ route('GET', '/dashboard', async (env) => {
     )
       .bind(t - 7 * DAY)
       .first(),
+    env.DB.prepare(
+      `SELECT st.id, st.name, COUNT(*) AS lessons, MIN(l.opens_at) AS since FROM lessons l JOIN students st ON st.id = l.student_id
+       WHERE l.paid = 0 AND l.opens_at <= ? AND st.archived = 0 GROUP BY st.id ORDER BY lessons DESC, st.name`,
+    )
+      .bind(t)
+      .all(),
   ]);
   return json({
     open: withStatus(open.results, t),
     upcoming: withStatus(upcoming.results, t),
     recent_lessons: withStatus(recentLessons.results, t),
     recent_feedback: recent.results,
+    unpaid: unpaid.results,
     counts,
   });
 });
@@ -156,7 +163,8 @@ route('GET', '/students', async (env) => {
        (SELECT COUNT(*) FROM messages m WHERE m.student_id = s.id AND m.role = 'user' AND m.created_at >= ?1) AS messages_7d,
        (SELECT ROUND(AVG(score), 1) FROM sessions x WHERE x.student_id = s.id AND x.score IS NOT NULL) AS avg_score,
        (SELECT COUNT(*) FROM lessons l WHERE l.student_id = s.id AND l.opens_at <= ?2 AND l.closes_at > ?2) AS open_lessons,
-       (SELECT MIN(opens_at) FROM lessons l WHERE l.student_id = s.id AND l.opens_at > ?2) AS next_lesson_at
+       (SELECT MIN(opens_at) FROM lessons l WHERE l.student_id = s.id AND l.opens_at > ?2) AS next_lesson_at,
+       (SELECT COUNT(*) FROM lessons l WHERE l.student_id = s.id AND l.paid = 0 AND l.opens_at <= ?2) AS unpaid
      FROM students s ORDER BY s.archived, s.name COLLATE NOCASE`,
   )
     .bind(t - 7 * DAY, t)
@@ -232,6 +240,7 @@ route('GET', '/students/:id', async (env, _req, [id]) => {
       lessons_partial: past.filter((l) => l.status === 'partial').length,
       lessons_missed: past.filter((l) => l.status === 'missed').length,
       lessons_total: past.length,
+      unpaid: ls.filter((l) => !l.paid && l.opens_at <= t).length,
       messages: agg?.messages ?? 0,
       messages_7d: agg?.messages_7d ?? 0,
       last_active: agg?.last_active ?? null,
@@ -385,6 +394,24 @@ route('PATCH', '/lessons/:id', async (env, _req, [id], body) => {
     .bind(f.topic_id, f.level, f.instructions, f.opens_at, f.closes_at, f.min_messages, notified, lesson.id)
     .run();
   return json({ ok: true });
+});
+
+route('PATCH', '/lessons/:id/paid', async (env, _req, [id], body) => {
+  const res = await env.DB.prepare('UPDATE lessons SET paid = ? WHERE id = ?').bind(body.paid ? 1 : 0, Number(id)).run();
+  if (!res.meta.changes) throw new HttpError(404, 'Занятие не найдено');
+  return json({ ok: true });
+});
+
+/** Расписание: все занятия, пересекающиеся с периодом [from, to). */
+route('GET', '/schedule', async (env, req) => {
+  const url = new URL(req.url);
+  const from = int(url.searchParams.get('from'), 0, 1e14);
+  const to = int(url.searchParams.get('to'), 0, 1e14);
+  if (to <= from || to - from > 62 * DAY) throw new HttpError(400, 'Неверный период');
+  const { results } = await env.DB.prepare(`${LESSON_SELECT} WHERE l.opens_at < ? AND l.closes_at > ? ORDER BY l.opens_at`)
+    .bind(to, from)
+    .all<LessonRow>();
+  return json({ lessons: withStatus(results) });
 });
 
 route('DELETE', '/lessons/:id', async (env, _req, [id]) => {

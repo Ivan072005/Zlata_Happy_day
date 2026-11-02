@@ -21,6 +21,8 @@ const ICONS = {
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
   share: '<path d="M12 3v13M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>',
+  chevronL: '<path d="M15 18l-6-6 6-6"/>',
+  chevronR: '<path d="M9 6l6 6-6 6"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
@@ -202,6 +204,7 @@ function onSubmit(form, handler) {
 // ───────── Роутер ─────────
 const routes = [
   [/^#?\/?$/, pageHome, 'home'],
+  [/^#\/schedule(?:\/(-?\d+))?$/, pageSchedule, 'schedule'],
   [/^#\/students$/, pageStudents, 'students'],
   [/^#\/students\/(\d+)$/, pageStudent, 'students'],
   [/^#\/sessions\/(\d+)$/, pageSession, 'students'],
@@ -273,9 +276,41 @@ function lessonRow(l, { showStudent = true } = {}) {
       <div class="row-sub">${sub}</div>
       ${l.status === 'upcoming' ? '' : `<div class="progress ${l.status === 'done' ? 'green' : ''}"><div style="width:${pct}%"></div></div>`}
     </div>
-    <div class="row-end">${statusBadge(l.status)}<span>${l.status === 'upcoming' ? '' : `${l.messages}/${l.min_messages}`}${l.score != null ? ` · ${l.score}/10` : ''}</span></div>
+    <div class="row-end">${statusBadge(l.status)}<span>${l.status === 'upcoming' ? '' : `${l.messages}/${l.min_messages}`}${l.score != null ? ` · ${l.score}/10` : ''}</span>
+      ${paidButton(l)}</div>
   </div>`;
 }
+
+const paidButton = (l) =>
+  `<button type="button" class="paid ${l.paid ? 'on' : ''}" data-toggle-paid="${l.id}" aria-pressed="${!!l.paid}" title="Отметить оплату">${l.paid ? '✓ оплачено' : '₴ не оплачено'}</button>`;
+
+// Отметка оплаты прямо из списка (без открытия занятия)
+document.addEventListener(
+  'click',
+  async (e) => {
+    const btn = e.target.closest('[data-toggle-paid]');
+    if (!btn) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const paid = !btn.classList.contains('on');
+    btn.disabled = true;
+    try {
+      await api(`/lessons/${btn.dataset.togglePaid}/paid`, { method: 'PATCH', body: { paid } });
+      $$(`[data-toggle-paid="${btn.dataset.togglePaid}"]`).forEach((b) => {
+        b.classList.toggle('on', paid);
+        b.setAttribute('aria-pressed', paid);
+        b.textContent = paid ? '✓ оплачено' : '₴ не оплачено';
+      });
+      $$(`[data-paid-switch="${btn.dataset.togglePaid}"]`).forEach((c) => (c.checked = paid));
+      toast(paid ? 'Отмечено: оплачено ✓' : 'Отмечено: не оплачено');
+    } catch (err) {
+      if (!(err instanceof AuthError)) toast(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  },
+  true,
+);
 
 async function pageHome() {
   setHeader({ title: 'Главная' });
@@ -301,6 +336,16 @@ async function pageHome() {
     ? `<div class="list">${d.open.map((l) => lessonRow(l)).join('')}</div>`
     : `<div class="card empty"><div class="emoji">☕️</div>Сейчас нет открытых занятий</div>`;
 
+  if (d.unpaid.length) {
+    const total = d.unpaid.reduce((a, u) => a + u.lessons, 0);
+    html += `<div class="section-title">Не оплачено · ${total} ${plural(total, 'занятие', 'занятия', 'занятий')}</div><div class="list">${d.unpaid
+      .map(
+        (u) => `<a class="row" href="#/students/${u.id}"><div class="avatar">${esc(initials(u.name))}</div>
+        <div class="row-main"><div class="row-title">${esc(u.name)}</div><div class="row-sub">с ${dayLabel(u.since)}</div></div>
+        <div class="row-end"><span class="badge amber">${u.lessons} ${plural(u.lessons, 'занятие', 'занятия', 'занятий')}</span></div></a>`,
+      )
+      .join('')}</div>`;
+  }
   if (d.upcoming.length) {
     html += `<div class="section-title">Скоро</div><div class="list">${d.upcoming.map((l) => lessonRow(l)).join('')}</div>`;
   }
@@ -323,7 +368,8 @@ async function pageHome() {
   }
 
   $('#view').innerHTML = html;
-  $$('#view [data-lesson]').forEach((el) => (el.onclick = () => (location.hash = `#/students/${el.dataset.student}`)));
+  const all = [...d.open, ...d.upcoming, ...d.recent_lessons];
+  $$('#view [data-lesson]').forEach((el) => (el.onclick = () => openLessonDetails(null, all.find((l) => l.id === Number(el.dataset.lesson)))));
 }
 
 // ───────── Ученики ─────────
@@ -342,7 +388,7 @@ async function pageStudents() {
       <div class="avatar">${esc(initials(s.name))}</div>
       <div class="row-main"><div class="row-title">${esc(s.name)}</div>
       <div class="row-sub" style="display:flex;align-items:center;gap:6px">${sub}</div></div>
-      <div class="row-end"><span class="badge accent">${s.level}</span>${s.avg_score != null ? `<span>⌀ ${s.avg_score}</span>` : ''}</div></a>`;
+      <div class="row-end"><span class="badge accent">${s.level}</span>${s.unpaid ? `<span class="badge amber">₴ ${s.unpaid}</span>` : s.avg_score != null ? `<span>⌀ ${s.avg_score}</span>` : ''}</div></a>`;
   };
 
   const active = students.filter((s) => !s.archived);
@@ -475,7 +521,8 @@ async function pageStudent(id) {
           <div class="meta"><span class="badge accent">${s.level}</span>
           ${s.corrections === 'inline' ? '<span class="badge">✏️ исправления сразу</span>' : ''}
           ${s.free_practice ? '<span class="badge green">свободная практика</span>' : ''}
-          ${s.archived ? '<span class="badge red">в архиве</span>' : ''}</div>
+          ${s.archived ? '<span class="badge red">в архиве</span>' : ''}
+          ${stats.unpaid ? `<span class="badge amber">₴ не оплачено: ${stats.unpaid}</span>` : ''}</div>
         </div>
       </div>
       ${s.note ? `<div class="note">${esc(s.note)}</div>` : ''}
@@ -490,7 +537,7 @@ async function pageStudent(id) {
       <div class="stat"><div class="stat-value" style="font-size:16px;padding:4px 0">${fmtAgo(stats.last_active)}</div><div class="stat-label">последняя активность</div></div>
     </div>
     ${
-      stats.scores.length > 1 || stats.words_total || stats.lessons_missed
+      stats.scores.length > 1 || stats.words_total || stats.lessons_missed || stats.unpaid
         ? `<div class="card mt">
       ${stats.scores.length > 1 ? `<div class="small muted">Оценки за последние ${stats.scores.length} разговоров</div>${sparkline(stats.scores)}` : ''}
       <div class="small muted mt" style="display:flex;gap:14px;flex-wrap:wrap">
@@ -499,6 +546,7 @@ async function pageStudent(id) {
         ${wordsPct !== null ? `<span>📚 Слова из тем: <b>${stats.words_used}/${stats.words_total}</b> (${wordsPct}%)</span>` : ''}
         ${stats.lessons_partial ? `<span>🟡 Частично: <b>${stats.lessons_partial}</b></span>` : ''}
         ${stats.lessons_missed ? `<span>🔴 Пропущено: <b>${stats.lessons_missed}</b></span>` : ''}
+        ${stats.unpaid ? `<span>₴ Не оплачено: <b>${stats.unpaid}</b></span>` : ''}
       </div></div>`
         : ''
     }
@@ -591,24 +639,41 @@ async function pageStudent(id) {
 }
 
 // ───────── Занятия ─────────
-async function openLessonForm(student, lesson = null) {
-  const [topics, settings] = await Promise.all([getTopics(), getSettings()]);
+async function openLessonForm(student, lesson = null, defaults = {}) {
+  const [topics, settings, students] = await Promise.all([
+    getTopics(),
+    getSettings(),
+    student ? Promise.resolve(null) : api('/students').then((r) => r.students.filter((s) => !s.archived)),
+  ]);
+  if (students && !students.length) {
+    toast('Сначала добавь ученика');
+    location.hash = '#/students';
+    return;
+  }
   const active = topics.filter((t) => t.active || t.id === lesson?.topic_id);
   const now = Date.now();
   const roundUp = (ts) => Math.ceil(ts / (5 * 60000)) * 5 * 60000;
-  const start = lesson ? lesson.opens_at : roundUp(now);
+  const start = lesson ? lesson.opens_at : defaults.opens ?? roundUp(now);
   const end = lesson ? lesson.closes_at : start + 3600000;
+  const levelLabel = (lvl) => `Как у ученика${lvl ? ` (${lvl})` : ''}`;
 
   const { el, close } = sheet(
-    lesson ? 'Изменить занятие' : `Занятие для ${student.name}`,
+    lesson ? 'Изменить занятие' : student ? `Занятие для ${student.name}` : 'Новое занятие',
     `<form id="f-lesson">
+      ${
+        students
+          ? `<label class="field"><span>Ученик</span><select class="input" name="student_id" required>
+          ${students.map((s) => `<option value="${s.id}" data-level="${s.level}">${esc(s.name)} · ${s.level}</option>`).join('')}
+        </select></label>`
+          : ''
+      }
       <label class="field"><span>Тема</span><select class="input" name="topic_id">
         ${active.map((t) => `<option value="${t.id}" ${t.id === lesson?.topic_id ? 'selected' : ''}>${esc(t.title)}</option>`).join('')}
         <option value="" ${lesson && !lesson.topic_id ? 'selected' : ''}>💬 Свободная тема</option>
       </select><small>Свои темы можно добавить во вкладке «Темы»</small></label>
 
       <label class="field"><span>Уровень общения</span><select class="input" name="level">
-        ${levelOptions(lesson?.level, `<option value="" ${!lesson?.level ? 'selected' : ''}>Как у ученика (${student.level})</option>`)}
+        ${levelOptions(lesson?.level, `<option value="" ${!lesson?.level ? 'selected' : ''} data-own>${levelLabel(student?.level ?? students?.[0]?.level)}</option>`)}
       </select></label>
 
       <div class="field"><span>Когда ученик может общаться с ботом</span>
@@ -643,6 +708,11 @@ async function openLessonForm(student, lesson = null) {
     </form>`,
   );
 
+  const studentSel = $('[name=student_id]', el);
+  if (studentSel) {
+    studentSel.onchange = () => ($('[data-own]', el).textContent = levelLabel(studentSel.selectedOptions[0].dataset.level));
+  }
+
   const opens = $('[name=opens]', el), closes = $('[name=closes]', el);
   $('#presets', el).onclick = (e) => {
     const p = e.target.closest('[data-p]')?.dataset.p;
@@ -663,7 +733,7 @@ async function openLessonForm(student, lesson = null) {
 
   onSubmit($('#f-lesson', el), async (f) => {
     const body = {
-      student_id: student.id,
+      student_id: student ? student.id : Number(f.student_id),
       topic_id: f.topic_id ? Number(f.topic_id) : null,
       level: f.level || null,
       opens_at: fromLocalInput(f.opens),
@@ -680,17 +750,26 @@ async function openLessonForm(student, lesson = null) {
   });
 }
 
-function openLessonDetails(student, l, sessions) {
+/** Подробности занятия. student и sessions есть, когда открыто из карточки ученика. */
+function openLessonDetails(student, l, sessions = null) {
+  if (!l) return;
   const pct = Math.min(100, Math.round((l.messages / l.min_messages) * 100));
-  const conv = sessions.filter((x) => x.lesson_id === l.id);
+  const conv = sessions ? sessions.filter((x) => x.lesson_id === l.id) : [];
   const { el, close } = sheet(
     l.topic_title ?? 'Свободная тема',
     `<div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">${statusBadge(l.status)}<span class="small muted">${l.level ?? student.level}</span></div>
+      ${student ? '' : `<a class="row" style="padding:0 0 12px;min-height:0;border-bottom:1px solid var(--border);margin-bottom:12px" href="#/students/${l.student_id}">
+        <div class="avatar">${esc(initials(l.student_name))}</div><div class="row-main"><div class="row-title">${esc(l.student_name)}</div>
+        <div class="row-sub">Открыть карточку ученика →</div></div></a>`}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">${statusBadge(l.status)}<span class="small muted">${l.level ?? student?.level ?? 'уровень ученика'}</span></div>
       <div class="mt">${icon('calendar').replace('<svg', '<svg style="display:inline;width:16px;height:16px;vertical-align:-3px;margin-right:4px"')}${fmtRange(l.opens_at, l.closes_at)}</div>
       <div class="mt small muted">Сообщений: <b>${l.messages}</b> из ${l.min_messages}${l.score != null ? ` · Оценка: <b>${l.score}/10</b>` : ''}</div>
       <div class="progress ${l.status === 'done' ? 'green' : ''}"><div style="width:${pct}%"></div></div>
       ${l.instructions ? `<div class="note">🤖 ${esc(l.instructions)}</div>` : ''}
+    </div>
+    <div class="card mt" style="padding-top:4px;padding-bottom:4px">
+      <div class="switch-row"><div><b>Оплачено</b><small>Отметка видна только тебе</small></div>
+        <label class="switch"><input type="checkbox" data-paid-switch="${l.id}" ${l.paid ? 'checked' : ''}><span></span></label></div>
     </div>
     ${
       l.words?.length
@@ -716,20 +795,112 @@ function openLessonDetails(student, l, sessions) {
       <button class="btn danger" data-a="delete">Удалить</button>
     </div>`,
   );
+  const sw = $('[data-paid-switch]', el);
+  sw.onchange = async () => {
+    try {
+      await api(`/lessons/${l.id}/paid`, { method: 'PATCH', body: { paid: sw.checked } });
+      l.paid = sw.checked ? 1 : 0;
+      $$(`[data-toggle-paid="${l.id}"]`).forEach((b) => {
+        b.classList.toggle('on', sw.checked);
+        b.textContent = sw.checked ? '✓ оплачено' : '₴ не оплачено';
+      });
+      toast(sw.checked ? 'Отмечено: оплачено ✓' : 'Отмечено: не оплачено');
+    } catch (err) {
+      sw.checked = !sw.checked;
+      if (!(err instanceof AuthError)) toast(err.message);
+    }
+  };
   el.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-a]')?.dataset.a;
     if (e.target.closest('a.row')) close();
-    if (a === 'edit') {
-      close();
-      openLessonForm(student, l);
-    }
-    if (a === 'delete' && confirm('Удалить занятие?')) {
-      await api(`/lessons/${l.id}`, { method: 'DELETE' });
-      close();
-      toast('Занятие удалено');
-      render();
+    try {
+      if (a === 'edit') {
+        close();
+        const st = student ?? (await api(`/students/${l.student_id}`)).student;
+        openLessonForm(st, l);
+      }
+      if (a === 'delete' && confirm('Удалить занятие?')) {
+        await api(`/lessons/${l.id}`, { method: 'DELETE' });
+        close();
+        toast('Занятие удалено');
+        render();
+      }
+    } catch (err) {
+      if (!(err instanceof AuthError)) toast(err.message);
     }
   });
+}
+
+// ───────── Расписание ─────────
+function weekStart(offset = 0) {
+  const d = new Date();
+  const day = (d.getDay() + 6) % 7; // понедельник = 0
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - day + offset * 7);
+}
+
+async function pageSchedule(offsetStr) {
+  const offset = Number(offsetStr || 0);
+  const from = weekStart(offset);
+  const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 7);
+  const last = new Date(to.getTime() - 1);
+  setHeader({ title: 'Расписание' });
+  setFab('Занятие', () => openLessonForm(null));
+  const { lessons } = await api(`/schedule?from=${from.getTime()}&to=${to.getTime()}`);
+
+  const sameMonth = from.getMonth() === last.getMonth();
+  const range = sameMonth
+    ? `${from.getDate()}–${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}`
+    : `${from.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} – ${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}`;
+  const paid = lessons.filter((l) => l.paid).length;
+  const done = lessons.filter((l) => l.status === 'done').length;
+
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const a = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i);
+    const b = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i + 1);
+    days.push({ date: a, lessons: lessons.filter((l) => Math.max(l.opens_at, from.getTime()) >= a.getTime() && Math.max(l.opens_at, from.getTime()) < b.getTime()) });
+  }
+  const todayKey = new Date().toDateString();
+
+  const row = (l) => `<div class="row sched" data-lesson="${l.id}">
+      <div class="sched-time"><b>${l.opens_at < from.getTime() ? '…' : fmtTime(l.opens_at)}</b><span>${new Date(l.closes_at).toDateString() === new Date(l.opens_at).toDateString() ? fmtTime(l.closes_at) : dayLabel(l.closes_at)}</span></div>
+      <div class="row-main"><div class="row-title">${esc(l.student_name)}</div>
+        <div class="row-sub">${esc(l.topic_title ?? 'Свободная тема')}${l.level ? ` · ${l.level}` : ''}</div></div>
+      <div class="row-end">${statusBadge(l.status)}${paidButton(l)}</div></div>`;
+
+  $('#view').innerHTML = `
+    <div class="week-nav">
+      <button class="icon-btn" data-week="${offset - 1}" aria-label="Прошлая неделя">${icon('chevronL')}</button>
+      <div class="week-title"><b>${range}</b><span>${offset === 0 ? 'эта неделя' : offset === 1 ? 'следующая неделя' : offset === -1 ? 'прошлая неделя' : from.getFullYear()}</span></div>
+      <button class="icon-btn" data-week="${offset + 1}" aria-label="Следующая неделя">${icon('chevronR')}</button>
+    </div>
+    ${offset !== 0 ? `<button class="link-btn" data-week="0" style="display:block;margin:0 auto 8px">Вернуться к этой неделе</button>` : ''}
+    <div class="stats three">
+      <div class="stat"><div class="stat-value">${lessons.length}</div><div class="stat-label">${plural(lessons.length, 'занятие', 'занятия', 'занятий')}</div></div>
+      <div class="stat"><div class="stat-value">${paid}<span class="muted" style="font-size:15px">/${lessons.length}</span></div><div class="stat-label">оплачено</div></div>
+      <div class="stat"><div class="stat-value">${done}</div><div class="stat-label">выполнено</div></div>
+    </div>
+    ${days
+      .map(
+        (d) => `<div class="section-title day ${d.date.toDateString() === todayKey ? 'today' : ''}">
+          <span>${d.date.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}${d.date.toDateString() === todayKey ? ' · сегодня' : ''}</span>
+          <button class="link-btn" data-add-day="${d.date.getTime()}">+ Добавить</button></div>
+        ${d.lessons.length ? `<div class="list">${d.lessons.map(row).join('')}</div>` : '<div class="day-empty">Нет занятий</div>'}`,
+      )
+      .join('')}`;
+
+  const v = $('#view');
+  v.onclick = (e) => {
+    const w = e.target.closest('[data-week]');
+    if (w) return (location.hash = Number(w.dataset.week) ? `#/schedule/${w.dataset.week}` : '#/schedule');
+    const add = e.target.closest('[data-add-day]');
+    if (add) {
+      const d = new Date(Number(add.dataset.addDay));
+      return openLessonForm(null, null, { opens: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 18, 0).getTime() });
+    }
+    const r = e.target.closest('[data-lesson]');
+    if (r) openLessonDetails(null, lessons.find((l) => l.id === Number(r.dataset.lesson)));
+  };
 }
 
 // ───────── Разговор ─────────
