@@ -62,6 +62,49 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at INTEGER NOT NULL
 );
 
+-- ───────── Реальные уроки и оплата ─────────
+
+-- Постоянный график в виде текста (каждое сохранение — новая версия)
+CREATE TABLE IF NOT EXISTS templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- Конкретные уроки по датам (создаются из графика по неделям, или вручную)
+CREATE TABLE IF NOT EXISTS classes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL,
+  week TEXT NOT NULL,                          -- понедельник недели, YYYY-MM-DD
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER NOT NULL,
+  price INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'planned',      -- planned | cancelled
+  manual INTEGER NOT NULL DEFAULT 0,           -- добавлен вручную (разовый)
+  edited INTEGER NOT NULL DEFAULT 0,           -- изменён вручную (не трогать при смене графика)
+  note TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- Недели, для которых уроки уже созданы из графика
+CREATE TABLE IF NOT EXISTS class_weeks (
+  week TEXT PRIMARY KEY
+);
+
+-- Оплаты (любая сумма: урок, пакет, частично)
+CREATE TABLE IF NOT EXISTS payments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL,
+  amount INTEGER NOT NULL,
+  note TEXT,
+  paid_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_classes_student ON classes(student_id, starts_at);
+CREATE INDEX IF NOT EXISTS idx_classes_week ON classes(week, starts_at);
+CREATE INDEX IF NOT EXISTS idx_payments_student ON payments(student_id, paid_at);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT

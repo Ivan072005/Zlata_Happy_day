@@ -1,7 +1,7 @@
 // Минимальный service worker: позволяет установить панель как приложение.
 // Данные (API) всегда берутся из сети; кэшируются только файлы интерфейса.
-const CACHE = 'panel-v1';
-const SHELL = ['/', '/style.css', '/app.js', '/icon.svg', '/manifest.webmanifest'];
+const CACHE = 'panel-v2';
+const SHELL = ['/', '/style.css', '/app.js', '/parser.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

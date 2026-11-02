@@ -1,7 +1,9 @@
 import { checkPassword, clearSessionCookie, isAuthed, makeSessionCookie } from './auth';
 import * as db from './db';
 import { lessonStatus, notifyLessonOpen, wordsUsed } from './lessons';
+import { allocate, balance, ensureWeek, getTemplate, parse, saveTemplate, type ClassRow } from './schedule';
 import { tg } from './telegram';
+import { addWeeks, endOfKyivDay, isWeekKey, weekKeyOf, weekRange } from './time';
 import { LEVELS, type Env, type Lesson, type Student } from './types';
 
 class HttpError extends Error {
@@ -12,6 +14,10 @@ class HttpError extends Error {
 
 const json = (data: unknown, init: ResponseInit = {}) => Response.json(data, init);
 const DAY = 24 * 3600 * 1000;
+
+/** Баланс ученика s.id на момент ?1: оплачено − стоимость проведённых уроков. */
+const BALANCE = `((SELECT COALESCE(SUM(amount), 0) FROM payments p WHERE p.student_id = s.id) -
+  (SELECT COALESCE(SUM(price), 0) FROM classes c WHERE c.student_id = s.id AND c.status = 'planned' AND c.starts_at <= ?1))`;
 
 // ───────── Проверка входных данных ─────────
 
@@ -114,7 +120,10 @@ const withStatus = (rows: LessonRow[], t = Date.now()) => rows.map((l) => ({ ...
 
 route('GET', '/dashboard', async (env) => {
   const t = Date.now();
-  const [open, upcoming, recent, recentLessons, counts, unpaid] = await Promise.all([
+  const week = weekKeyOf(t);
+  await ensureWeek(env, week);
+  const [, we] = weekRange(week);
+  const [open, upcoming, recent, recentLessons, counts, debts, today, weekClasses, monthPaid] = await Promise.all([
     env.DB.prepare(`${LESSON_SELECT} WHERE l.opens_at <= ?1 AND l.closes_at > ?1 AND st.archived = 0 ORDER BY l.closes_at`).bind(t).all<LessonRow>(),
     env.DB.prepare(`${LESSON_SELECT} WHERE l.opens_at > ?1 AND l.opens_at < ?2 AND st.archived = 0 ORDER BY l.opens_at LIMIT 30`)
       .bind(t, t + 2 * DAY)
@@ -137,18 +146,37 @@ route('GET', '/dashboard', async (env) => {
       .bind(t - 7 * DAY)
       .first(),
     env.DB.prepare(
-      `SELECT st.id, st.name, COUNT(*) AS lessons, MIN(l.opens_at) AS since FROM lessons l JOIN students st ON st.id = l.student_id
-       WHERE l.paid = 0 AND l.opens_at <= ? AND st.archived = 0 GROUP BY st.id ORDER BY lessons DESC, st.name`,
+      `SELECT * FROM (SELECT s.id, s.name, ${BALANCE} AS balance FROM students s WHERE s.archived = 0) WHERE balance < 0 ORDER BY balance`,
     )
       .bind(t)
-      .all(),
+      .all<{ id: number; name: string; balance: number }>(),
+    env.DB.prepare(
+      `SELECT c.*, s.name AS student_name FROM classes c JOIN students s ON s.id = c.student_id
+       WHERE c.starts_at >= ?1 AND c.starts_at < ?2 ORDER BY c.starts_at`,
+    )
+      .bind(t - 3 * 3600 * 1000, we)
+      .all<ClassRow & { student_name: string }>(),
+    env.DB.prepare("SELECT student_id, price, id FROM classes WHERE week = ? AND status = 'planned'").bind(week).all<{ student_id: number; price: number; id: number }>(),
+    env.DB.prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE paid_at >= ?').bind(t - 30 * DAY).first<{ total: number }>(),
   ]);
+  const weekAlloc = await allocate(env, [...new Set(weekClasses.results.map((c) => c.student_id))], we);
+  const todayEnd = endOfKyivDay(t);
+  const upcomingClasses = today.results.filter((c) => c.ends_at > t);
+  const todayAlloc = await allocate(env, [...new Set(upcomingClasses.map((c) => c.student_id))], we);
   return json({
     open: withStatus(open.results, t),
     upcoming: withStatus(upcoming.results, t),
     recent_lessons: withStatus(recentLessons.results, t),
     recent_feedback: recent.results,
-    unpaid: unpaid.results,
+    debts: debts.results,
+    classes_next: upcomingClasses.slice(0, 12).map((c) => ({ ...c, pay: todayAlloc.get(c.id) ?? null, today: c.starts_at < todayEnd })),
+    week: {
+      key: week,
+      lessons: weekClasses.results.length,
+      expected: weekClasses.results.reduce((a, c) => a + c.price, 0),
+      covered: weekClasses.results.reduce((a, c) => a + (weekAlloc.get(c.id)?.covered ?? 0), 0),
+    },
+    paid_30d: monthPaid?.total ?? 0,
     counts,
   });
 });
@@ -164,7 +192,8 @@ route('GET', '/students', async (env) => {
        (SELECT ROUND(AVG(score), 1) FROM sessions x WHERE x.student_id = s.id AND x.score IS NOT NULL) AS avg_score,
        (SELECT COUNT(*) FROM lessons l WHERE l.student_id = s.id AND l.opens_at <= ?2 AND l.closes_at > ?2) AS open_lessons,
        (SELECT MIN(opens_at) FROM lessons l WHERE l.student_id = s.id AND l.opens_at > ?2) AS next_lesson_at,
-       (SELECT COUNT(*) FROM lessons l WHERE l.student_id = s.id AND l.paid = 0 AND l.opens_at <= ?2) AS unpaid
+       ${BALANCE.replace(/\?1/g, '?2')} AS balance,
+       (SELECT MIN(starts_at) FROM classes c WHERE c.student_id = s.id AND c.status = 'planned' AND c.starts_at > ?2) AS next_class_at
      FROM students s ORDER BY s.archived, s.name COLLATE NOCASE`,
   )
     .bind(t - 7 * DAY, t)
@@ -233,14 +262,30 @@ route('GET', '/students/:id', async (env, _req, [id]) => {
   const scored = sessions.results.filter((x) => x.score !== null);
   const allWords = ls.flatMap((l) => (l.status === 'upcoming' ? [] : l.words));
 
+  // Финансы: уроки и оплаты (недели на месяц вперёд — чтобы было видно, на сколько уроков хватит предоплаты)
+  for (let i = 0; i <= 4; i++) await ensureWeek(env, addWeeks(weekKeyOf(t), i));
+  const [classes, payments, bal] = await Promise.all([
+    env.DB.prepare('SELECT * FROM classes WHERE student_id = ? ORDER BY starts_at DESC LIMIT 80').bind(s.id).all<ClassRow>(),
+    env.DB.prepare('SELECT * FROM payments WHERE student_id = ? ORDER BY paid_at DESC, id DESC LIMIT 100').bind(s.id).all(),
+    balance(env, s.id),
+  ]);
+  const alloc = await allocate(env, [s.id]);
+  const upcomingCovered = classes.results.filter((c) => c.status === 'planned' && c.starts_at > t && alloc.get(c.id)?.state === 'paid').length;
+
   return json({
+    finance: {
+      ...bal,
+      prepaid_lessons: upcomingCovered,
+      classes: classes.results.map((c) => ({ ...c, pay: c.status === 'planned' ? alloc.get(c.id) ?? null : null })),
+      payments: payments.results,
+    },
     student: { ...s, invite_code: undefined, invite_link: await inviteLink(env, s.invite_code) },
     stats: {
       lessons_done: past.filter((l) => l.status === 'done').length,
       lessons_partial: past.filter((l) => l.status === 'partial').length,
       lessons_missed: past.filter((l) => l.status === 'missed').length,
       lessons_total: past.length,
-      unpaid: ls.filter((l) => !l.paid && l.opens_at <= t).length,
+
       messages: agg?.messages ?? 0,
       messages_7d: agg?.messages_7d ?? 0,
       last_active: agg?.last_active ?? null,
@@ -283,6 +328,8 @@ route('DELETE', '/students/:id', async (env, _req, [id]) => {
     env.DB.prepare('DELETE FROM messages WHERE student_id = ?').bind(sid),
     env.DB.prepare('DELETE FROM sessions WHERE student_id = ?').bind(sid),
     env.DB.prepare('DELETE FROM lessons WHERE student_id = ?').bind(sid),
+    env.DB.prepare('DELETE FROM classes WHERE student_id = ?').bind(sid),
+    env.DB.prepare('DELETE FROM payments WHERE student_id = ?').bind(sid),
     env.DB.prepare('DELETE FROM students WHERE id = ?').bind(sid),
   ]);
   return json({ ok: true });
@@ -396,26 +443,101 @@ route('PATCH', '/lessons/:id', async (env, _req, [id], body) => {
   return json({ ok: true });
 });
 
-route('PATCH', '/lessons/:id/paid', async (env, _req, [id], body) => {
-  const res = await env.DB.prepare('UPDATE lessons SET paid = ? WHERE id = ?').bind(body.paid ? 1 : 0, Number(id)).run();
-  if (!res.meta.changes) throw new HttpError(404, 'Занятие не найдено');
+route('DELETE', '/lessons/:id', async (env, _req, [id]) => {
+  await env.DB.prepare('DELETE FROM lessons WHERE id = ?').bind(Number(id)).run();
   return json({ ok: true });
 });
 
-/** Расписание: все занятия, пересекающиеся с периодом [from, to). */
-route('GET', '/schedule', async (env, req) => {
-  const url = new URL(req.url);
-  const from = int(url.searchParams.get('from'), 0, 1e14);
-  const to = int(url.searchParams.get('to'), 0, 1e14);
-  if (to <= from || to - from > 62 * DAY) throw new HttpError(400, 'Неверный период');
-  const { results } = await env.DB.prepare(`${LESSON_SELECT} WHERE l.opens_at < ? AND l.closes_at > ? ORDER BY l.opens_at`)
-    .bind(to, from)
-    .all<LessonRow>();
-  return json({ lessons: withStatus(results) });
+// ───────── Постоянный график и уроки ─────────
+
+route('GET', '/template', async (env) => {
+  const tpl = await getTemplate(env);
+  return json({ text: tpl?.text ?? '', updated_at: tpl?.created_at ?? null });
 });
 
-route('DELETE', '/lessons/:id', async (env, _req, [id]) => {
-  await env.DB.prepare('DELETE FROM lessons WHERE id = ?').bind(Number(id)).run();
+route('PUT', '/template', async (env, _req, _p, body) => {
+  const text = str(body.text, 20000) ?? '';
+  const { errors } = parse(text);
+  if (errors.length) return json({ error: `Есть ошибки в строках: ${errors.map((e) => e.line).join(', ')}`, errors }, { status: 400 });
+  return json(await saveTemplate(env, text));
+});
+
+route('GET', '/week', async (env, req) => {
+  const url = new URL(req.url);
+  const week = url.searchParams.get('week') || weekKeyOf(Date.now());
+  if (!isWeekKey(week)) throw new HttpError(400, 'Неверная неделя');
+  await ensureWeek(env, week);
+  const [, end] = weekRange(week);
+  const { results } = await env.DB.prepare(
+    `SELECT c.*, s.name AS student_name, s.archived FROM classes c JOIN students s ON s.id = c.student_id WHERE c.week = ? ORDER BY c.starts_at`,
+  )
+    .bind(week)
+    .all<ClassRow & { student_name: string }>();
+  const alloc = await allocate(env, [...new Set(results.map((c) => c.student_id))], end);
+  const tpl = await getTemplate(env);
+  const slots = tpl ? parse(tpl.text).items.filter((i) => i.kind !== 'lesson') : [];
+  const classes = results.map((c) => ({ ...c, pay: c.status === 'planned' ? alloc.get(c.id) ?? null : null }));
+  const planned = classes.filter((c) => c.status === 'planned');
+  return json({
+    week,
+    prev: addWeeks(week, -1),
+    next: addWeeks(week, 1),
+    current: weekKeyOf(Date.now()),
+    has_template: !!tpl,
+    classes,
+    slots,
+    totals: {
+      lessons: planned.length,
+      expected: planned.reduce((a, c) => a + c.price, 0),
+      covered: planned.reduce((a, c) => a + (c.pay?.covered ?? 0), 0),
+      cancelled: classes.length - planned.length,
+    },
+  });
+});
+
+route('POST', '/classes', async (env, _req, _p, body) => {
+  const student = await db.getStudent(env, int(body.student_id, 1, 1e9));
+  if (!student) throw new HttpError(404, 'Ученик не найден');
+  const starts = int(body.starts_at, 0, 1e14);
+  const ends = body.ends_at ? int(body.ends_at, starts + 1, 1e14) : starts + 3600 * 1000;
+  const res = await env.DB.prepare(
+    'INSERT INTO classes (student_id, week, starts_at, ends_at, price, manual, note, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+  )
+    .bind(student.id, weekKeyOf(starts), starts, ends, int(body.price, 0, 1e6), str(body.note, 200), Date.now())
+    .run();
+  return json({ id: Number(res.meta.last_row_id) });
+});
+
+route('PATCH', '/classes/:id', async (env, _req, [id], body) => {
+  const c = await env.DB.prepare('SELECT * FROM classes WHERE id = ?').bind(Number(id)).first<ClassRow>();
+  if (!c) throw new HttpError(404, 'Урок не найден');
+  const status = 'status' in body ? (body.status === 'cancelled' ? 'cancelled' : 'planned') : c.status;
+  const price = 'price' in body ? int(body.price, 0, 1e6) : c.price;
+  const note = 'note' in body ? str(body.note, 200) : c.note;
+  await env.DB.prepare('UPDATE classes SET status = ?, price = ?, note = ?, edited = 1 WHERE id = ?').bind(status, price, note, c.id).run();
+  return json({ ok: true });
+});
+
+route('DELETE', '/classes/:id', async (env, _req, [id]) => {
+  await env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(Number(id)).run();
+  return json({ ok: true });
+});
+
+// ───────── Оплаты ─────────
+
+route('POST', '/payments', async (env, _req, _p, body) => {
+  const student = await db.getStudent(env, int(body.student_id, 1, 1e9));
+  if (!student) throw new HttpError(404, 'Ученик не найден');
+  const amount = int(body.amount, 1, 1e7);
+  const paidAt = body.paid_at ? int(body.paid_at, 0, 1e14) : Date.now();
+  const res = await env.DB.prepare('INSERT INTO payments (student_id, amount, note, paid_at, created_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(student.id, amount, str(body.note, 200), paidAt, Date.now())
+    .run();
+  return json({ id: Number(res.meta.last_row_id), ...(await balance(env, student.id)) });
+});
+
+route('DELETE', '/payments/:id', async (env, _req, [id]) => {
+  await env.DB.prepare('DELETE FROM payments WHERE id = ?').bind(Number(id)).run();
   return json({ ok: true });
 });
 

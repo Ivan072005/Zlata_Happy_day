@@ -1,5 +1,7 @@
 import * as db from './db';
 import { finishWithFeedback, notifyLessonOpen } from './lessons';
+import { ensureWeek } from './schedule';
+import { addWeeks, weekKeyOf } from './time';
 import type { Env, Lesson, Session, Student } from './types';
 
 const FREE_PRACTICE_IDLE_MS = 3 * 3600 * 1000;
@@ -8,6 +10,11 @@ const FREE_PRACTICE_IDLE_MS = 3 * 3600 * 1000;
 export async function runCron(env: Env): Promise<void> {
   const t = Date.now();
   const settings = await db.getSettings(env);
+
+  // 0. Уроки из постоянного графика на эту и следующую неделю
+  const week = weekKeyOf(t);
+  await ensureWeek(env, week);
+  await ensureWeek(env, addWeeks(week, 1));
 
   // 1. Уведомить учеников об открывшихся занятиях
   await env.DB.prepare('UPDATE lessons SET notified = 1 WHERE notified = 0 AND closes_at <= ?').bind(t).run();

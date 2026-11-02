@@ -350,3 +350,29 @@ textarea.input { min-height: 96px; resize: vertical; }
 .sched-time b { font-size: 15px; }
 .sched-time span { font-size: 12px; color: var(--muted); }
 .tabbar a span:last-child { white-space: nowrap; }
+
+/* ───────── Деньги и график ───────── */
+.money-big { font-size: 24px; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.money-big .muted { font-size: 15px; font-weight: 600; }
+.money-week { display: block; color: inherit; }
+.red-text { color: var(--red); }
+.green-text { color: var(--green); }
+.row.cancelled .row-title, .row.cancelled .sched-time b { text-decoration: line-through; color: var(--muted); }
+.row.slot { min-height: 44px; cursor: default; background: var(--surface-2); }
+.row.slot.busy .row-sub { font-style: italic; }
+@media (hover: hover) { .row.slot:hover { background: var(--surface-2); } }
+.appbar .btn { white-space: nowrap; }
+textarea.tpl {
+  font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-height: 240px; margin-top: 12px; resize: none; overflow: hidden;
+}
+.help summary { cursor: pointer; }
+.help code, .err-line code { background: var(--surface-2); padding: 1px 5px; border-radius: 6px; font-size: 13px; }
+.error-card { margin-top: 12px; border-color: var(--red); background: var(--red-soft); }
+.err-line { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; font-size: 13px; }
+.err-line span { color: var(--red); }
+.save-bar {
+  position: sticky; bottom: calc(var(--tabbar-h) + var(--safe-b) + 8px); z-index: 5; margin-top: 16px;
+  padding: 8px; border-radius: 18px; background: color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+}

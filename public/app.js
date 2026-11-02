@@ -1,4 +1,5 @@
 // Панель преподавателя. Без сборки и зависимостей: обычный JS.
+import { parseSchedule, DAY_NAMES } from '/parser.js';
 
 const LEVELS = ['A1', 'A2', 'B1', 'B2', 'C1'];
 const STATUS = {
@@ -204,7 +205,8 @@ function onSubmit(form, handler) {
 // ───────── Роутер ─────────
 const routes = [
   [/^#?\/?$/, pageHome, 'home'],
-  [/^#\/schedule(?:\/(-?\d+))?$/, pageSchedule, 'schedule'],
+  [/^#\/schedule(?:\/(\d{4}-\d{2}-\d{2}))?$/, pageSchedule, 'schedule'],
+  [/^#\/template$/, pageTemplate, 'schedule'],
   [/^#\/students$/, pageStudents, 'students'],
   [/^#\/students\/(\d+)$/, pageStudent, 'students'],
   [/^#\/sessions\/(\d+)$/, pageSession, 'students'],
@@ -277,40 +279,9 @@ function lessonRow(l, { showStudent = true } = {}) {
       ${l.status === 'upcoming' ? '' : `<div class="progress ${l.status === 'done' ? 'green' : ''}"><div style="width:${pct}%"></div></div>`}
     </div>
     <div class="row-end">${statusBadge(l.status)}<span>${l.status === 'upcoming' ? '' : `${l.messages}/${l.min_messages}`}${l.score != null ? ` · ${l.score}/10` : ''}</span>
-      ${paidButton(l)}</div>
+</div>
   </div>`;
 }
-
-const paidButton = (l) =>
-  `<button type="button" class="paid ${l.paid ? 'on' : ''}" data-toggle-paid="${l.id}" aria-pressed="${!!l.paid}" title="Отметить оплату">${l.paid ? '✓ оплачено' : '₴ не оплачено'}</button>`;
-
-// Отметка оплаты прямо из списка (без открытия занятия)
-document.addEventListener(
-  'click',
-  async (e) => {
-    const btn = e.target.closest('[data-toggle-paid]');
-    if (!btn) return;
-    e.stopPropagation();
-    e.preventDefault();
-    const paid = !btn.classList.contains('on');
-    btn.disabled = true;
-    try {
-      await api(`/lessons/${btn.dataset.togglePaid}/paid`, { method: 'PATCH', body: { paid } });
-      $$(`[data-toggle-paid="${btn.dataset.togglePaid}"]`).forEach((b) => {
-        b.classList.toggle('on', paid);
-        b.setAttribute('aria-pressed', paid);
-        b.textContent = paid ? '✓ оплачено' : '₴ не оплачено';
-      });
-      $$(`[data-paid-switch="${btn.dataset.togglePaid}"]`).forEach((c) => (c.checked = paid));
-      toast(paid ? 'Отмечено: оплачено ✓' : 'Отмечено: не оплачено');
-    } catch (err) {
-      if (!(err instanceof AuthError)) toast(err.message);
-    } finally {
-      btn.disabled = false;
-    }
-  },
-  true,
-);
 
 async function pageHome() {
   setHeader({ title: 'Главная' });
@@ -331,26 +302,35 @@ async function pageHome() {
     <div class="stat"><div class="stat-value">${c.messages_7d}</div><div class="stat-label">сообщений за неделю</div></div>
   </div>`;
 
-  html += `<div class="section-title">Сейчас открыто</div>`;
-  html += d.open.length
-    ? `<div class="list">${d.open.map((l) => lessonRow(l)).join('')}</div>`
-    : `<div class="card empty"><div class="emoji">☕️</div>Сейчас нет открытых занятий</div>`;
+  const w = d.week;
+  html += `<a class="card mt money-week" href="#/schedule">
+      <div><div class="small muted">Эта неделя · ${w.lessons} ${plural(w.lessons, 'урок', 'урока', 'уроков')}</div>
+      <div class="money-big">${money(w.covered)} <span class="muted">из ${money(w.expected)}</span></div>
+      <div class="small muted">оплачено · за 30 дней получено ${money(d.paid_30d)}</div></div>
+      <div class="progress green" style="margin-top:10px"><div style="width:${w.expected ? Math.round((w.covered / w.expected) * 100) : 0}%"></div></div></a>`;
 
-  if (d.unpaid.length) {
-    const total = d.unpaid.reduce((a, u) => a + u.lessons, 0);
-    html += `<div class="section-title">Не оплачено · ${total} ${plural(total, 'занятие', 'занятия', 'занятий')}</div><div class="list">${d.unpaid
+  if (d.classes_next.length) {
+    html += `<div class="section-title">Ближайшие уроки <a class="link-btn" href="#/schedule">Расписание →</a></div>
+      <div class="list">${d.classes_next.map((c) => classRow(c, { showDay: true })).join('')}</div>`;
+  }
+  if (d.debts.length) {
+    const total = d.debts.reduce((a, x) => a - x.balance, 0);
+    html += `<div class="section-title">Долги · ${money(total)}</div><div class="list">${d.debts
       .map(
-        (u) => `<a class="row" href="#/students/${u.id}"><div class="avatar">${esc(initials(u.name))}</div>
-        <div class="row-main"><div class="row-title">${esc(u.name)}</div><div class="row-sub">с ${dayLabel(u.since)}</div></div>
-        <div class="row-end"><span class="badge amber">${u.lessons} ${plural(u.lessons, 'занятие', 'занятия', 'занятий')}</span></div></a>`,
+        (x) => `<a class="row" href="#/students/${x.id}"><div class="avatar">${esc(initials(x.name))}</div>
+        <div class="row-main"><div class="row-title">${esc(x.name)}</div></div>
+        <div class="row-end"><span class="badge red">−${money(-x.balance)}</span></div></a>`,
       )
       .join('')}</div>`;
   }
+  if (d.open.length || d.upcoming.length) html += `<div class="section-title" style="margin-top:28px">🤖 Практика с ботом</div>`;
+  if (d.open.length) html += `<div class="small muted" style="margin:0 4px 6px">Сейчас открыто</div><div class="list">${d.open.map((l) => lessonRow(l)).join('')}</div>`;
+
   if (d.upcoming.length) {
-    html += `<div class="section-title">Скоро</div><div class="list">${d.upcoming.map((l) => lessonRow(l)).join('')}</div>`;
+    html += `<div class="small muted" style="margin:12px 4px 6px">Скоро</div><div class="list">${d.upcoming.map((l) => lessonRow(l)).join('')}</div>`;
   }
   if (d.recent_lessons.length) {
-    html += `<div class="section-title">Недавно закончились</div><div class="list">${d.recent_lessons.map((l) => lessonRow(l)).join('')}</div>`;
+    html += `<div class="section-title">Практика: недавно закончились</div><div class="list">${d.recent_lessons.map((l) => lessonRow(l)).join('')}</div>`;
   }
   if (d.recent_feedback.length) {
     html += `<div class="section-title">Последние разборы</div><div class="list">${d.recent_feedback
@@ -370,6 +350,7 @@ async function pageHome() {
   $('#view').innerHTML = html;
   const all = [...d.open, ...d.upcoming, ...d.recent_lessons];
   $$('#view [data-lesson]').forEach((el) => (el.onclick = () => openLessonDetails(null, all.find((l) => l.id === Number(el.dataset.lesson)))));
+  $$('#view [data-class]').forEach((el) => (el.onclick = () => openClassSheet(d.classes_next.find((c) => c.id === Number(el.dataset.class)))));
 }
 
 // ───────── Ученики ─────────
@@ -388,7 +369,7 @@ async function pageStudents() {
       <div class="avatar">${esc(initials(s.name))}</div>
       <div class="row-main"><div class="row-title">${esc(s.name)}</div>
       <div class="row-sub" style="display:flex;align-items:center;gap:6px">${sub}</div></div>
-      <div class="row-end"><span class="badge accent">${s.level}</span>${s.unpaid ? `<span class="badge amber">₴ ${s.unpaid}</span>` : s.avg_score != null ? `<span>⌀ ${s.avg_score}</span>` : ''}</div></a>`;
+      <div class="row-end"><span class="badge accent">${s.level}</span>${s.balance < 0 ? `<span class="badge red">−${money(-s.balance)}</span>` : s.balance > 0 ? `<span class="badge green">+${money(s.balance)}</span>` : s.avg_score != null ? `<span>⌀ ${s.avg_score}</span>` : ''}</div></a>`;
   };
 
   const active = students.filter((s) => !s.archived);
@@ -504,7 +485,7 @@ async function pageStudent(id) {
   const data = await api(`/students/${id}`);
   const { student: s, stats, lessons, sessions } = data;
   setHeader({ title: s.name, back: '#/students' });
-  setFab('Занятие', () => openLessonForm(s));
+  setFab('Оплата', () => openPaymentSheet(s, data.finance));
 
   const now = Date.now();
   const current = lessons.filter((l) => l.closes_at > now).sort((a, b) => a.opens_at - b.opens_at);
@@ -522,14 +503,16 @@ async function pageStudent(id) {
           ${s.corrections === 'inline' ? '<span class="badge">✏️ исправления сразу</span>' : ''}
           ${s.free_practice ? '<span class="badge green">свободная практика</span>' : ''}
           ${s.archived ? '<span class="badge red">в архиве</span>' : ''}
-          ${stats.unpaid ? `<span class="badge amber">₴ не оплачено: ${stats.unpaid}</span>` : ''}</div>
+</div>
         </div>
       </div>
       ${s.note ? `<div class="note">${esc(s.note)}</div>` : ''}
       ${inviteBlock(s)}
     </div>
 
-    <div class="section-title">Статистика</div>
+    ${financeBlock(data.finance)}
+
+    <div class="section-title">Статистика практики с ботом</div>
     <div class="stats four">
       <div class="stat"><div class="stat-value">${stats.lessons_done}<span class="muted" style="font-size:15px">/${stats.lessons_total}</span></div><div class="stat-label">занятий выполнено</div></div>
       <div class="stat"><div class="stat-value">${stats.avg_score ?? '—'}</div><div class="stat-label">средняя оценка</div></div>
@@ -537,7 +520,7 @@ async function pageStudent(id) {
       <div class="stat"><div class="stat-value" style="font-size:16px;padding:4px 0">${fmtAgo(stats.last_active)}</div><div class="stat-label">последняя активность</div></div>
     </div>
     ${
-      stats.scores.length > 1 || stats.words_total || stats.lessons_missed || stats.unpaid
+      stats.scores.length > 1 || stats.words_total || stats.lessons_missed
         ? `<div class="card mt">
       ${stats.scores.length > 1 ? `<div class="small muted">Оценки за последние ${stats.scores.length} разговоров</div>${sparkline(stats.scores)}` : ''}
       <div class="small muted mt" style="display:flex;gap:14px;flex-wrap:wrap">
@@ -546,19 +529,18 @@ async function pageStudent(id) {
         ${wordsPct !== null ? `<span>📚 Слова из тем: <b>${stats.words_used}/${stats.words_total}</b> (${wordsPct}%)</span>` : ''}
         ${stats.lessons_partial ? `<span>🟡 Частично: <b>${stats.lessons_partial}</b></span>` : ''}
         ${stats.lessons_missed ? `<span>🔴 Пропущено: <b>${stats.lessons_missed}</b></span>` : ''}
-        ${stats.unpaid ? `<span>₴ Не оплачено: <b>${stats.unpaid}</b></span>` : ''}
       </div></div>`
         : ''
     }
 
-    <div class="section-title">Текущие и будущие занятия <button class="link-btn" data-action="add-lesson">+ Назначить</button></div>
+    <div class="section-title">🤖 Практика с ботом <button class="link-btn" data-action="add-lesson">+ Открыть</button></div>
     ${
       current.length
         ? `<div class="list">${current.map((l) => lessonRow(l, { showStudent: false })).join('')}</div>`
-        : `<div class="card empty"><div class="emoji">📅</div>Нет запланированных занятий.<br>Пока занятие не назначено, ${s.free_practice ? 'ученик может только свободно практиковаться' : 'ученик не может общаться с ботом'}.</div>`
+        : `<div class="card empty"><div class="emoji">🤖</div>Практика не назначена.<br>Пока её нет, ${s.free_practice ? 'ученик может только свободно практиковаться' : 'ученик не может общаться с ботом'}.</div>`
     }
 
-    ${past.length ? `<div class="section-title">Прошедшие занятия</div><div class="list">${past.map((l) => lessonRow(l, { showStudent: false })).join('')}</div>` : ''}
+    ${past.length ? `<div class="section-title">Прошедшая практика</div><div class="list">${past.map((l) => lessonRow(l, { showStudent: false })).join('')}</div>` : ''}
 
     ${
       sessions.length
@@ -612,6 +594,16 @@ async function pageStudent(id) {
       else if (a === 'copy') await copyText(inviteText());
       else if (a === 'share') await navigator.share({ text: inviteText() }).catch(() => {});
       else if (a === 'add-lesson') openLessonForm(s);
+      else if (a === 'add-payment') openPaymentSheet(s, data.finance);
+      else if (a === 'del-payment') {
+        if (!confirm('Удалить эту оплату?')) return;
+        await api(`/payments/${e.target.closest('[data-id]').dataset.id}`, { method: 'DELETE' });
+        toast('Оплата удалена');
+        render();
+      } else if (e.target.closest('[data-class]')) {
+        const c = data.finance.classes.find((x) => x.id === Number(e.target.closest('[data-class]').dataset.class));
+        openClassSheet({ ...c, student_name: s.name });
+      }
       else if (a === 'archive') {
         await api(`/students/${s.id}`, { method: 'PATCH', body: { archived: !s.archived } });
         toast(s.archived ? 'Ученик возвращён' : 'Перемещён в архив');
@@ -767,10 +759,6 @@ function openLessonDetails(student, l, sessions = null) {
       <div class="progress ${l.status === 'done' ? 'green' : ''}"><div style="width:${pct}%"></div></div>
       ${l.instructions ? `<div class="note">🤖 ${esc(l.instructions)}</div>` : ''}
     </div>
-    <div class="card mt" style="padding-top:4px;padding-bottom:4px">
-      <div class="switch-row"><div><b>Оплачено</b><small>Отметка видна только тебе</small></div>
-        <label class="switch"><input type="checkbox" data-paid-switch="${l.id}" ${l.paid ? 'checked' : ''}><span></span></label></div>
-    </div>
     ${
       l.words?.length
         ? `<div class="section-title">Слова темы</div><div class="card"><div class="words">${l.words
@@ -795,21 +783,6 @@ function openLessonDetails(student, l, sessions = null) {
       <button class="btn danger" data-a="delete">Удалить</button>
     </div>`,
   );
-  const sw = $('[data-paid-switch]', el);
-  sw.onchange = async () => {
-    try {
-      await api(`/lessons/${l.id}/paid`, { method: 'PATCH', body: { paid: sw.checked } });
-      l.paid = sw.checked ? 1 : 0;
-      $$(`[data-toggle-paid="${l.id}"]`).forEach((b) => {
-        b.classList.toggle('on', sw.checked);
-        b.textContent = sw.checked ? '✓ оплачено' : '₴ не оплачено';
-      });
-      toast(sw.checked ? 'Отмечено: оплачено ✓' : 'Отмечено: не оплачено');
-    } catch (err) {
-      sw.checked = !sw.checked;
-      if (!(err instanceof AuthError)) toast(err.message);
-    }
-  };
   el.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-a]')?.dataset.a;
     if (e.target.closest('a.row')) close();
@@ -831,75 +804,341 @@ function openLessonDetails(student, l, sessions = null) {
   });
 }
 
-// ───────── Расписание ─────────
-function weekStart(offset = 0) {
-  const d = new Date();
-  const day = (d.getDay() + 6) % 7; // понедельник = 0
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() - day + offset * 7);
+// ───────── Деньги ─────────
+const money = (n) => `${Math.round(n).toLocaleString('ru-RU')} ₴`;
+
+function payBadge(c) {
+  if (c.status === 'cancelled') return '<span class="badge">отменён</span>';
+  if (!c.pay || c.pay.state === 'unpaid') return `<span class="badge ${c.starts_at <= Date.now() ? 'red' : ''}">₴ не оплачено</span>`;
+  if (c.pay.state === 'partial') return `<span class="badge amber">частично ${c.pay.covered}/${c.price}</span>`;
+  return '<span class="badge green">✓ оплачено</span>';
 }
 
-async function pageSchedule(offsetStr) {
-  const offset = Number(offsetStr || 0);
-  const from = weekStart(offset);
-  const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 7);
-  const last = new Date(to.getTime() - 1);
-  setHeader({ title: 'Расписание' });
-  setFab('Занятие', () => openLessonForm(null));
-  const { lessons } = await api(`/schedule?from=${from.getTime()}&to=${to.getTime()}`);
+function classRow(c, { showDay = false, showStudent = true } = {}) {
+  const cancelled = c.status === 'cancelled';
+  return `<div class="row sched ${cancelled ? 'cancelled' : ''}" data-class="${c.id}">
+    <div class="sched-time"><b>${fmtTime(c.starts_at)}</b><span>${showDay ? dayLabel(c.starts_at) : fmtTime(c.ends_at)}</span></div>
+    <div class="row-main"><div class="row-title">${showStudent ? esc(c.student_name) : dayLabel(c.starts_at)}</div>
+      <div class="row-sub">${money(c.price)}${c.manual ? ' · разовый' : ''}${c.note ? ` · ${esc(c.note)}` : ''}</div></div>
+    <div class="row-end">${payBadge(c)}</div></div>`;
+}
 
-  const sameMonth = from.getMonth() === last.getMonth();
-  const range = sameMonth
-    ? `${from.getDate()}–${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}`
-    : `${from.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} – ${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}`;
-  const paid = lessons.filter((l) => l.paid).length;
-  const done = lessons.filter((l) => l.status === 'done').length;
+function financeBlock(f) {
+  let state;
+  if (f.balance < 0) state = `<div class="money-big red-text">Долг ${money(-f.balance)}</div>`;
+  else if (f.balance > 0) state = `<div class="money-big green-text">Предоплата ${money(f.balance)}</div>
+      <div class="small muted">${f.prepaid_lessons ? `хватит на ${f.prepaid_lessons} ${plural(f.prepaid_lessons, 'следующий урок', 'следующих урока', 'следующих уроков')}` : 'частично покрывает следующий урок'}</div>`;
+  else state = `<div class="money-big">0 ₴</div><div class="small muted">${f.held ? 'всё оплачено' : 'уроков ещё не было'}</div>`;
+  const now = Date.now();
+  const upcoming = f.classes.filter((c) => c.starts_at > now).sort((a, b) => a.starts_at - b.starts_at).slice(0, 4);
+  const past = f.classes.filter((c) => c.starts_at <= now).slice(0, 8);
+  return `<div class="section-title">💰 Оплата <button class="link-btn" data-action="add-payment">+ Внести</button></div>
+    <div class="card">${state}
+      <div class="small muted mt">Проведено уроков: <b>${f.held}</b> на ${money(f.charged)} · оплачено всего ${money(f.paid)}</div></div>
+    ${upcoming.length ? `<div class="small muted" style="margin:12px 4px 6px">Следующие уроки</div><div class="list">${upcoming.map((c) => classRow(c, { showDay: true, showStudent: false })).join('')}</div>` : ''}
+    ${past.length ? `<div class="small muted" style="margin:12px 4px 6px">Прошедшие уроки</div><div class="list">${past.map((c) => classRow(c, { showDay: true, showStudent: false })).join('')}</div>` : ''}
+    ${
+      f.payments.length
+        ? `<div class="small muted" style="margin:12px 4px 6px">Оплаты</div><div class="list">${f.payments
+            .slice(0, 10)
+            .map(
+              (p) => `<div class="row" data-id="${p.id}"><div class="row-main"><div class="row-title green-text">+${money(p.amount)}</div>
+            <div class="row-sub">${new Date(p.paid_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}${p.note ? ` · ${esc(p.note)}` : ''}</div></div>
+            <div class="row-end"><button class="link-btn" data-action="del-payment" aria-label="Удалить оплату">✕</button></div></div>`,
+            )
+            .join('')}</div>`
+        : ''
+    }`;
+}
 
-  const days = [];
-  for (let i = 0; i < 7; i++) {
-    const a = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i);
-    const b = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i + 1);
-    days.push({ date: a, lessons: lessons.filter((l) => Math.max(l.opens_at, from.getTime()) >= a.getTime() && Math.max(l.opens_at, from.getTime()) < b.getTime()) });
-  }
+/** Окно «Внести оплату». */
+async function openPaymentSheet(student, finance = null, defaults = {}) {
+  if (!finance) finance = (await api(`/students/${student.id}`)).finance;
+  const lastPrice = finance.classes.find((c) => c.status === 'planned')?.price ?? 0;
+  const debt = finance.balance < 0 ? -finance.balance : 0;
+  const chips = [];
+  if (debt) chips.push([debt, `Весь долг · ${money(debt)}`]);
+  if (lastPrice) for (const n of [1, 4, 8]) chips.push([lastPrice * n, `${n} ${plural(n, 'урок', 'урока', 'уроков')} · ${money(lastPrice * n)}`]);
+  const { el, close } = sheet(
+    `Оплата · ${student.name}`,
+    `<form id="f-pay">
+      ${chips.length ? `<div class="chips" id="pay-chips">${chips.map(([v, l]) => `<button type="button" class="chip" data-v="${v}">${l}</button>`).join('')}</div>` : ''}
+      <label class="field"><span>Сумма, ₴</span><input class="input" type="number" name="amount" min="1" step="1" required inputmode="numeric" value="${defaults.amount ?? ''}" placeholder="350"></label>
+      <label class="field"><span>Дата</span><input class="input" type="date" name="date" value="${toLocalInput(Date.now()).slice(0, 10)}" required></label>
+      <label class="field"><span>Комментарий (необязательно)</span><input class="input" name="note" maxlength="200" placeholder="Например: пакет 8 уроков, наличными"></label>
+      <p class="small muted" style="margin-top:0">Можно внести любую сумму: за урок, пакетом или частично. Деньги сами распределятся по урокам по порядку.</p>
+      <button class="btn block big" type="submit">Внести оплату</button>
+    </form>`,
+  );
+  $('#pay-chips', el)?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-v]');
+    if (!b) return;
+    $$('#pay-chips .chip', el).forEach((c) => c.classList.toggle('on', c === b));
+    $('[name=amount]', el).value = b.dataset.v;
+    if (/урок/.test(b.textContent) && !$('[name=note]', el).value) $('[name=note]', el).value = b.textContent.split(' · ')[0];
+  });
+  onSubmit($('#f-pay', el), async (f) => {
+    const [y, m, d] = f.date.split('-').map(Number);
+    const today = toLocalInput(Date.now()).slice(0, 10) === f.date;
+    const r = await api('/payments', {
+      method: 'POST',
+      body: { student_id: student.id, amount: Number(f.amount), note: f.note, paid_at: today ? Date.now() : new Date(y, m - 1, d, 12).getTime() },
+    });
+    close();
+    toast(r.balance < 0 ? `Внесено. Остаток долга ${money(-r.balance)}` : r.balance > 0 ? `Внесено. Предоплата ${money(r.balance)}` : 'Внесено. Всё оплачено ✓');
+    render();
+  });
+}
+
+/** Окно урока: оплата, отмена, цена. */
+function openClassSheet(c) {
+  if (!c) return;
+  const cancelled = c.status === 'cancelled';
+  const { el, close } = sheet(
+    c.student_name,
+    `<div class="card">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><b>${dayLabel(c.starts_at)}, ${fmtTime(c.starts_at)}–${fmtTime(c.ends_at)}</b>${payBadge(c)}</div>
+      <div class="small muted mt">${money(c.price)}${c.manual ? ' · разовый урок' : ' · из постоянного графика'}${c.pay?.state === 'partial' ? ` · оплачено ${money(c.pay.covered)}` : ''}</div>
+    </div>
+    <form id="f-class" class="card mt">
+      <div class="grid-2">
+        <label class="field" style="margin:0"><span>Цена этого урока, ₴</span><input class="input" type="number" name="price" min="0" value="${c.price}" inputmode="numeric"></label>
+        <label class="field" style="margin:0"><span>Заметка</span><input class="input" name="note" maxlength="200" value="${esc(c.note ?? '')}" placeholder="перенос, замена…"></label>
+      </div>
+      <button class="btn secondary block mt" type="submit">Сохранить</button>
+    </form>
+    <div class="row-gap mt">
+      ${cancelled ? '' : `<button class="btn block" data-a="pay">💰 Внести оплату</button>`}
+      <button class="btn ghost block" data-a="cancel">${cancelled ? '↩︎ Вернуть урок' : '❌ Отменить урок (не считать)'}</button>
+      <button class="btn ghost block" data-a="practice">🤖 Открыть практику с ботом</button>
+      <a class="btn ghost block" href="#/students/${c.student_id}">Карточка ученика</a>
+      ${c.manual ? '<button class="btn danger block" data-a="delete">Удалить урок</button>' : ''}
+    </div>`,
+  );
+  onSubmit($('#f-class', el), async (f) => {
+    await api(`/classes/${c.id}`, { method: 'PATCH', body: { price: Number(f.price), note: f.note } });
+    close();
+    toast('Сохранено ✓');
+    render();
+  });
+  el.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-a]')?.dataset.a;
+    if (e.target.closest('a.btn')) close();
+    try {
+      if (a === 'pay') {
+        close();
+        openPaymentSheet({ id: c.student_id, name: c.student_name }, null, { amount: c.pay ? c.price - c.pay.covered : c.price });
+      } else if (a === 'cancel') {
+        await api(`/classes/${c.id}`, { method: 'PATCH', body: { status: cancelled ? 'planned' : 'cancelled' } });
+        close();
+        toast(cancelled ? 'Урок возвращён' : 'Урок отменён — он не будет считаться');
+        render();
+      } else if (a === 'practice') {
+        close();
+        openLessonForm((await api(`/students/${c.student_id}`)).student);
+      } else if (a === 'delete' && confirm('Удалить разовый урок?')) {
+        await api(`/classes/${c.id}`, { method: 'DELETE' });
+        close();
+        toast('Удалено');
+        render();
+      }
+    } catch (err) {
+      if (!(err instanceof AuthError)) toast(err.message);
+    }
+  });
+}
+
+/** Разовый урок (вне постоянного графика). */
+async function openAddClass(defaults = {}) {
+  const { students } = await api('/students');
+  const active = students.filter((s) => !s.archived);
+  if (!active.length) return toast('Сначала добавь ученика');
+  const start = defaults.start ?? Math.ceil(Date.now() / 3600000) * 3600000;
+  const { el, close } = sheet(
+    'Разовый урок',
+    `<form id="f-add-class">
+      <label class="field"><span>Ученик</span><select class="input" name="student_id">${active.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></label>
+      <div class="dates">
+        <label class="field" style="margin:0"><span>Начало</span><input class="input" type="datetime-local" name="start" value="${toLocalInput(start)}" required></label>
+        <label class="field" style="margin:0"><span>Длительность</span><select class="input" name="dur"><option value="45">45 мин</option><option value="60" selected>1 час</option><option value="90">1,5 часа</option><option value="120">2 часа</option></select></label>
+      </div>
+      <label class="field mt"><span>Цена, ₴</span><input class="input" type="number" name="price" min="0" required inputmode="numeric" placeholder="350"></label>
+      <label class="field"><span>Заметка</span><input class="input" name="note" maxlength="200" placeholder="перенос с понедельника, доп. урок…"></label>
+      <p class="small muted" style="margin-top:0">Постоянные уроки добавляются через «Постоянный график». Здесь — переносы и дополнительные уроки.</p>
+      <button class="btn block big" type="submit">Добавить урок</button>
+    </form>`,
+  );
+  onSubmit($('#f-add-class', el), async (f) => {
+    const s = fromLocalInput(f.start);
+    await api('/classes', { method: 'POST', body: { student_id: Number(f.student_id), starts_at: s, ends_at: s + Number(f.dur) * 60000, price: Number(f.price), note: f.note } });
+    close();
+    toast('Урок добавлен ✓');
+    render();
+  });
+}
+
+// ───────── Расписание (реальные уроки) ─────────
+async function pageSchedule(week) {
+  const d = await api(`/week${week ? `?week=${week}` : ''}`);
+  setHeader({ title: 'Расписание', action: `<a class="btn secondary" style="min-height:38px;padding:6px 12px" href="#/template">✏️ График</a>` });
+  setFab('Урок', () => openAddClass());
+
+  const from = new Date(`${d.week}T00:00:00`);
+  const last = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 6);
+  const range =
+    from.getMonth() === last.getMonth()
+      ? `${from.getDate()}–${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}`
+      : `${from.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} – ${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}`;
+  const label = d.week === d.current ? 'эта неделя' : d.week > d.current ? (d.prev === d.current ? 'следующая неделя' : 'будущая неделя') : d.next === d.current ? 'прошлая неделя' : 'прошедшая неделя';
+  const t = d.totals;
   const todayKey = new Date().toDateString();
 
-  const row = (l) => `<div class="row sched" data-lesson="${l.id}">
-      <div class="sched-time"><b>${l.opens_at < from.getTime() ? '…' : fmtTime(l.opens_at)}</b><span>${new Date(l.closes_at).toDateString() === new Date(l.opens_at).toDateString() ? fmtTime(l.closes_at) : dayLabel(l.closes_at)}</span></div>
-      <div class="row-main"><div class="row-title">${esc(l.student_name)}</div>
-        <div class="row-sub">${esc(l.topic_title ?? 'Свободная тема')}${l.level ? ` · ${l.level}` : ''}</div></div>
-      <div class="row-end">${statusBadge(l.status)}${paidButton(l)}</div></div>`;
+  let html = `
+    <div class="week-nav">
+      <a class="icon-btn" href="#/schedule/${d.prev}" aria-label="Прошлая неделя">${icon('chevronL')}</a>
+      <div class="week-title"><b>${range}</b><span>${label}</span></div>
+      <a class="icon-btn" href="#/schedule/${d.next}" aria-label="Следующая неделя">${icon('chevronR')}</a>
+    </div>
+    ${d.week !== d.current ? `<a class="link-btn" href="#/schedule" style="display:block;text-align:center;margin:0 0 8px">Вернуться к этой неделе</a>` : ''}`;
+
+  if (!d.has_template) {
+    html += `<div class="card empty"><div class="emoji">🗓</div><b>Заполни постоянный график</b><br>Вставь его текстом, как в заметках, — уроки на каждую неделю появятся сами.
+      <div class="mt"><a class="btn" href="#/template">✏️ Заполнить график</a></div></div>`;
+  }
+
+  html += `<div class="stats three">
+      <div class="stat"><div class="stat-value">${t.lessons}</div><div class="stat-label">${plural(t.lessons, 'урок', 'урока', 'уроков')}${t.cancelled ? ` · ${t.cancelled} отм.` : ''}</div></div>
+      <div class="stat"><div class="stat-value">${money(t.expected)}</div><div class="stat-label">ожидается</div></div>
+      <div class="stat"><div class="stat-value green-text">${money(t.covered)}</div><div class="stat-label">оплачено</div></div>
+    </div>`;
+
+  for (let i = 0; i < 7; i++) {
+    const day = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i);
+    const next = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i + 1);
+    const cls = d.classes.filter((c) => c.starts_at >= day.getTime() && c.starts_at < next.getTime());
+    // Свободные окна и занятое время из графика (только для текущей и будущих недель)
+    const extra = d.week >= d.current ? d.slots.filter((s) => s.day === i) : [];
+    const entries = [
+      ...cls.map((c) => ({ t: fmtTime(c.starts_at), html: classRow(c) })),
+      ...extra.map((s) => ({
+        t: s.start,
+        html: `<div class="row sched slot ${s.kind}"><div class="sched-time"><b>${s.start}</b><span>${s.kind === 'busy' ? s.end : ''}</span></div>
+          <div class="row-main"><div class="row-sub">${s.kind === 'free' ? 'свободно' : 'занято'}</div></div></div>`,
+      })),
+    ].sort((a, b) => a.t.localeCompare(b.t));
+    const isToday = day.toDateString() === todayKey;
+    if (!entries.length && i >= 5) continue; // пустые выходные не показываем
+    html += `<div class="section-title day ${isToday ? 'today' : ''}"><span>${day.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}${isToday ? ' · сегодня' : ''}</span>
+        <span class="small muted" style="font-weight:500">${cls.filter((c) => c.status === 'planned').length ? money(cls.filter((c) => c.status === 'planned').reduce((a, c) => a + c.price, 0)) : ''}</span></div>
+      ${entries.length ? `<div class="list">${entries.map((e) => e.html).join('')}</div>` : '<div class="day-empty">Нет уроков</div>'}`;
+  }
+
+  $('#view').innerHTML = html;
+  $('#view').onclick = (e) => {
+    const r = e.target.closest('[data-class]');
+    if (r) openClassSheet(d.classes.find((c) => c.id === Number(r.dataset.class)));
+  };
+}
+
+// ───────── Постоянный график (текст как в заметках) ─────────
+const TEMPLATE_HELP = `Понедельник
+10:00 Мария 350
+11:00
+12:00 Оля 350
+
+Вторник
+9:00 — 12:00
+13:00 Макс 350`;
+
+async function pageTemplate() {
+  setHeader({ title: 'Постоянный график', back: '#/schedule' });
+  const [{ text, updated_at }, { students }] = await Promise.all([api('/template'), api('/students')]);
+  const known = new Set(students.filter((s) => !s.archived).map((s) => s.name.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е')));
 
   $('#view').innerHTML = `
-    <div class="week-nav">
-      <button class="icon-btn" data-week="${offset - 1}" aria-label="Прошлая неделя">${icon('chevronL')}</button>
-      <div class="week-title"><b>${range}</b><span>${offset === 0 ? 'эта неделя' : offset === 1 ? 'следующая неделя' : offset === -1 ? 'прошлая неделя' : from.getFullYear()}</span></div>
-      <button class="icon-btn" data-week="${offset + 1}" aria-label="Следующая неделя">${icon('chevronR')}</button>
-    </div>
-    ${offset !== 0 ? `<button class="link-btn" data-week="0" style="display:block;margin:0 auto 8px">Вернуться к этой неделе</button>` : ''}
-    <div class="stats three">
-      <div class="stat"><div class="stat-value">${lessons.length}</div><div class="stat-label">${plural(lessons.length, 'занятие', 'занятия', 'занятий')}</div></div>
-      <div class="stat"><div class="stat-value">${paid}<span class="muted" style="font-size:15px">/${lessons.length}</span></div><div class="stat-label">оплачено</div></div>
-      <div class="stat"><div class="stat-value">${done}</div><div class="stat-label">выполнено</div></div>
-    </div>
-    ${days
-      .map(
-        (d) => `<div class="section-title day ${d.date.toDateString() === todayKey ? 'today' : ''}">
-          <span>${d.date.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}${d.date.toDateString() === todayKey ? ' · сегодня' : ''}</span>
-          <button class="link-btn" data-add-day="${d.date.getTime()}">+ Добавить</button></div>
-        ${d.lessons.length ? `<div class="list">${d.lessons.map(row).join('')}</div>` : '<div class="day-empty">Нет занятий</div>'}`,
-      )
-      .join('')}`;
+    <details class="card help" ${text ? '' : 'open'}>
+      <summary><b>Как заполнять</b></summary>
+      <div class="small" style="margin-top:8px">Пиши как в заметках — можно просто вставить свои заметки целиком:
+        <ul style="margin:6px 0;padding-left:18px">
+          <li><code>Понедельник</code> — день недели</li>
+          <li><code>10:00 Мария 350</code> — урок: время, имя, цена</li>
+          <li><code>11:00</code> — свободное окно</li>
+          <li><code>9:00 — 12:00</code> — занято</li>
+          <li>Одно имя = один ученик. Разных с одинаковым именем пиши с буквой: <code>София К.</code></li>
+        </ul>
+        Новые имена станут учениками автоматически.</div>
+    </details>
+    <textarea class="input tpl" id="tpl" spellcheck="false" placeholder="${esc(TEMPLATE_HELP)}">${esc(text)}</textarea>
+    <div id="preview"></div>
+    <div class="save-bar"><button class="btn block big" id="save">Сохранить график</button></div>
+    ${updated_at ? `<p class="small muted" style="text-align:center">Последнее изменение: ${fmtWhen(updated_at)}</p>` : ''}`;
 
-  const v = $('#view');
-  v.onclick = (e) => {
-    const w = e.target.closest('[data-week]');
-    if (w) return (location.hash = Number(w.dataset.week) ? `#/schedule/${w.dataset.week}` : '#/schedule');
-    const add = e.target.closest('[data-add-day]');
-    if (add) {
-      const d = new Date(Number(add.dataset.addDay));
-      return openLessonForm(null, null, { opens: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 18, 0).getTime() });
+  const ta = $('#tpl');
+  const autosize = () => {
+    ta.style.height = 'auto';
+    ta.style.height = Math.max(240, ta.scrollHeight + 4) + 'px';
+  };
+  let parsed;
+  const update = () => {
+    parsed = parseSchedule(ta.value);
+    const lessons = parsed.items.filter((i) => i.kind === 'lesson');
+    const total = lessons.reduce((a, i) => a + i.price, 0);
+    const newNames = [...new Set(lessons.map((i) => i.name).filter((n) => !known.has(n.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е'))))];
+    const people = new Set(lessons.map((i) => i.name.trim().toLowerCase())).size;
+    let h = '';
+    if (parsed.errors.length) {
+      h += `<div class="card error-card"><b>⚠️ Не понял ${parsed.errors.length} ${plural(parsed.errors.length, 'строку', 'строки', 'строк')}:</b>${parsed.errors
+        .map((e) => `<div class="err-line"><code>${e.line}: ${esc(e.text.trim())}</code><span>${esc(e.message)}</span></div>`)
+        .join('')}</div>`;
     }
-    const r = e.target.closest('[data-lesson]');
-    if (r) openLessonDetails(null, lessons.find((l) => l.id === Number(r.dataset.lesson)));
+    if (lessons.length) {
+      h += `<div class="card mt"><b>${lessons.length} ${plural(lessons.length, 'урок', 'урока', 'уроков')} в неделю · ${people} ${plural(people, 'ученик', 'ученика', 'учеников')} · ${money(total)}</b>
+        ${newNames.length ? `<div class="small mt">🆕 Будут добавлены ученики: ${newNames.map((n) => `<span class="badge accent">${esc(n)}</span>`).join(' ')}</div>` : ''}</div>`;
+    }
+    for (let d = 0; d < 7; d++) {
+      const items = parsed.items.filter((i) => i.day === d);
+      if (!items.length) continue;
+      h += `<div class="section-title day"><span>${DAY_NAMES[d]}</span></div><div class="list">${items
+        .map(
+          (i) => `<div class="row sched slot ${i.kind}"><div class="sched-time"><b>${i.start}</b><span>${i.end}</span></div>
+          <div class="row-main">${i.kind === 'lesson' ? `<div class="row-title">${esc(i.name)}</div>` : `<div class="row-sub">${i.kind === 'free' ? 'свободно' : 'занято'}</div>`}</div>
+          <div class="row-end">${i.kind === 'lesson' ? money(i.price) : ''}</div></div>`,
+        )
+        .join('')}</div>`;
+    }
+    $('#preview').innerHTML = h || '<div class="empty small">Здесь появится предпросмотр</div>';
+    $('#save').classList.toggle('danger', parsed.errors.length > 0);
+    $('#save').textContent = parsed.errors.length
+      ? `⚠️ Ошибка в ${plural(parsed.errors.length, 'строке', 'строках', 'строках')} ${parsed.errors.map((e) => e.line).join(', ')} — показать`
+      : 'Сохранить график';
+  };
+  ta.addEventListener('input', () => {
+    autosize();
+    update();
+  });
+  autosize();
+  update();
+
+  $('#save').onclick = async () => {
+    if (parsed.errors.length) {
+      // Выделяем первую ошибочную строку прямо в тексте и показываем список ошибок
+      const first = parsed.errors[0].line;
+      const lines = ta.value.split('\n');
+      const start = lines.slice(0, first - 1).join('\n').length + (first > 1 ? 1 : 0);
+      ta.focus();
+      ta.setSelectionRange(start, start + lines[first - 1].length);
+      $('.error-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    $('#save').disabled = true;
+    try {
+      const r = await api('/template', { method: 'PUT', body: { text: ta.value } });
+      toast(r.created.length ? `Сохранено. Добавлено учеников: ${r.created.length}` : 'График сохранён ✓');
+      location.hash = '#/schedule';
+    } catch (err) {
+      if (!(err instanceof AuthError)) toast(err.message);
+      $('#save').disabled = false;
+    }
   };
 }
 
