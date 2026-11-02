@@ -1245,6 +1245,7 @@ async function pageTextEditor(mode, week = null) {
   const isWeek = mode === 'week';
   const [data, { students }] = await Promise.all([isWeek ? api(`/week?week=${week}`) : api('/template'), api('/students')]);
   const text = data.text;
+  let savedText = text;
   const updated_at = data.updated_at;
   let title = 'Постоянный график';
   if (isWeek) {
@@ -1261,6 +1262,11 @@ async function pageTextEditor(mode, week = null) {
         ? `<div class="card info-card">Это график <b>только этой недели</b>. Отмены, переносы, замены — пиши сюда. Следующие недели начнутся с постоянного графика.</div>`
         : `<div class="card info-card">Это <b>постоянный график</b> — каждая новая неделя начинается с него. Разовые изменения (отмены, замены) делай в расписании конкретной недели.</div>`
     }
+    <div class="editor-bar">
+      <button class="btn secondary" id="toggle-edit">✏️ Редактировать текстом</button>
+      <a class="link-btn" href="${isWeek ? `#/schedule/${week}` : '#/schedule'}">Расписание →</a>
+    </div>
+    <div id="editor">
     <details class="card help mt" ${text ? '' : 'open'}>
       <summary><b>Как заполнять</b></summary>
       <div class="small" style="margin-top:8px">Пиши как в заметках — можно просто вставить свои заметки целиком:
@@ -1277,11 +1283,13 @@ async function pageTextEditor(mode, week = null) {
         Новые имена станут учениками автоматически.</div>
     </details>
     <textarea class="input tpl" id="tpl" spellcheck="false" placeholder="${esc(TEMPLATE_HELP)}">${esc(text)}</textarea>
-    <div id="preview"></div>
     <div class="save-bar">
       ${!isWeek && text ? `<div class="segmented" id="apply" style="margin-bottom:8px"><button class="on" data-v="this">С этой недели</button><button data-v="next">Со следующей недели</button></div>` : ''}
-      <button class="btn block big" id="save">${isWeek ? 'Сохранить неделю' : 'Сохранить график'}</button></div>
-    ${updated_at ? `<p class="small muted" style="text-align:center">Последнее изменение: ${fmtWhen(updated_at)}</p>` : ''}`;
+      <button class="btn block big" id="save">${isWeek ? 'Сохранить неделю' : 'Сохранить график'}</button>
+      <button class="btn ghost block" id="cancel-edit" style="margin-top:8px">Свернуть без сохранения</button></div>
+    </div>
+    <div id="preview"></div>
+    <p class="small muted" id="updated" style="text-align:center">${updated_at ? `Последнее изменение: ${fmtWhen(updated_at)}` : ''}</p>`;
 
   const ta = $('#tpl');
   const autosize = () => {
@@ -1343,6 +1351,26 @@ async function pageTextEditor(mode, week = null) {
   autosize();
   update();
 
+  // Текст свёрнут, пока график заполнен: видно только таблицу. Редактирование — по кнопке.
+  const setEditing = (on) => {
+    $('#editor').hidden = !on;
+    $('#toggle-edit').hidden = on;
+    if (on) {
+      autosize();
+      ta.focus({ preventScroll: true });
+      $('#editor').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+  setEditing(!text);
+  $('#toggle-edit').onclick = () => setEditing(true);
+  $('#cancel-edit').onclick = () => {
+    if (ta.value !== savedText && !confirm('Есть несохранённые изменения. Отменить их?')) return;
+    ta.value = savedText;
+    update();
+    setEditing(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   $('#apply')?.addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (b) $$('#apply button').forEach((x) => x.classList.toggle('on', x === b));
@@ -1359,18 +1387,25 @@ async function pageTextEditor(mode, week = null) {
     }
     $('#save').disabled = true;
     try {
+      let r, msg;
       if (isWeek) {
-        const r = await api('/week', { method: 'PUT', body: { week, text: ta.value } });
-        toast(r.created.length ? `Неделя сохранена. Новые ученики: ${r.created.length}` : 'Неделя сохранена ✓');
-        location.hash = `#/schedule/${week}`;
+        r = await api('/week', { method: 'PUT', body: { week, text: ta.value } });
+        msg = r.created.length ? `Неделя сохранена. Новые ученики: ${r.created.length}` : 'Неделя сохранена ✓';
       } else {
         const apply = $('#apply .on')?.dataset.v ?? 'this';
-        const r = await api('/template', { method: 'PUT', body: { text: ta.value, apply } });
-        let msg = r.created.length ? `Сохранено. Новых учеников: ${r.created.length}` : 'График сохранён ✓';
+        r = await api('/template', { method: 'PUT', body: { text: ta.value, apply } });
+        msg = r.created.length ? `Сохранено. Новых учеников: ${r.created.length}` : 'График сохранён ✓';
         if (r.kept?.length) msg += `. Недели, изменённые вручную, не тронуты (${r.kept.length})`;
-        toast(msg);
-        location.hash = '#/schedule';
       }
+      // Сохранено: сворачиваем текст, остаёмся на странице с обновлённым графиком
+      for (const n of r.created ?? []) known.add(n.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е'));
+      savedText = ta.value;
+      update();
+      setEditing(false);
+      $('#save').disabled = false;
+      $('#updated').textContent = `Последнее изменение: ${fmtWhen(Date.now())}`;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      toast(msg);
     } catch (err) {
       if (!(err instanceof AuthError)) toast(err.message);
       $('#save').disabled = false;

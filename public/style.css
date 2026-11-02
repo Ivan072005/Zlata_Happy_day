@@ -387,3 +387,16 @@ textarea.tpl {
 .week-actions .small { flex: 1 1 200px; }
 .info-card { background: var(--accent-soft); border-color: transparent; font-size: 14px; }
 .row.slot.free[data-line]:active { background: var(--accent-soft); }
+
+/* ───────── Чёткие линии таблиц ───────── */
+:root { --line: #cfd4df; --line-strong: #b7bdcb; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --line: #3b4250; --line-strong: #4b5363; } }
+:root[data-theme="dark"] { --line: #3b4250; --line-strong: #4b5363; }
+.list { border: 1px solid var(--line-strong); }
+.row { border-bottom: 1px solid var(--line); }
+.row.sched .sched-time { align-self: stretch; display: flex; flex-direction: column; justify-content: center; padding-right: 12px; border-right: 1px solid var(--line); width: 64px; }
+.row.slot { background: color-mix(in srgb, var(--surface-2) 70%, var(--surface)); }
+.section-title.day { padding-bottom: 6px; border-bottom: 2px solid var(--line-strong); margin-bottom: 10px; }
+.editor-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.editor-bar .btn { flex: 1; }
+#editor[hidden] { display: none !important; }
