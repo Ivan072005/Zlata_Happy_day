@@ -17,4 +17,4 @@ GEMINI_MODEL = "gemini-flash-latest"
 [[d1_databases]]
 binding = "DB"
 database_name = "english-bot"
-database_id = "ВСТАВЬ_СЮДА_ID_БАЗЫ"
+database_id = "1e560130-3366-4a08-9b92-897d42adcf84"
