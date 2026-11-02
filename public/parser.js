@@ -4,10 +4,11 @@
 // Формат:
 //   Понедельник              ← день недели (можно Пн, Понеділок, с двоеточием)
 //   10:00 Мария 350          ← урок: время, имя, цена
-//   10:00-11:30 Мария 500    ← урок с временем окончания
+//   15:00 — 16:00 Иван 600   ← урок на два слота (15:00 и 16:00), то есть 15:00–17:00
 //   11:00                    ← свободное окно
-//   9:00 — 12:00             ← свободное время с 9 до 12
+//   9:00 — 12:00             ← свободные слоты 9, 10, 11, 12 (до 13:00)
 //   9:00 — 12:00 занято      ← занято / нерабочее время (слова: занято, перерыв, выходной, нерабочее)
+// Время — это начало часового слота, поэтому промежуток «А — Б» длится до Б + 1 час.
 // Пустые строки, заголовки и значки в начале строки (|, -, •, >) игнорируются.
 
 const DAYS = [
@@ -65,8 +66,10 @@ export function parseSchedule(text, defaultMinutes = 60) {
     }
 
     const start = normTime(m[1], m[2]);
-    const endRaw = m[3] ? normTime(m[3], m[4]) : null;
-    if (!start || (m[3] && !endRaw)) {
+    const lastSlot = m[3] ? normTime(m[3], m[4]) : null;
+    // «15:00 — 16:00» = слоты 15:00 и 16:00 → конец в 17:00
+    const endRaw = lastSlot ? fromMinutes(Math.min(toMinutes(lastSlot) + defaultMinutes, 24 * 60 - 1)) : null;
+    if (!start || (m[3] && !lastSlot)) {
       errors.push({ line, text: raw, message: 'Неверное время' });
       return;
     }
@@ -75,7 +78,7 @@ export function parseSchedule(text, defaultMinutes = 60) {
 
     if (!rest || busy) {
       const end = endRaw ?? fromMinutes(toMinutes(start) + defaultMinutes);
-      if (toMinutes(end) <= toMinutes(start)) {
+      if (lastSlot && toMinutes(lastSlot) < toMinutes(start)) {
         errors.push({ line, text: raw, message: 'Конец должен быть позже начала' });
         return;
       }
@@ -89,7 +92,7 @@ export function parseSchedule(text, defaultMinutes = 60) {
       return;
     }
     const end = endRaw ?? fromMinutes(toMinutes(start) + defaultMinutes);
-    if (toMinutes(end) <= toMinutes(start)) {
+    if (lastSlot && toMinutes(lastSlot) < toMinutes(start)) {
       errors.push({ line, text: raw, message: 'Конец должен быть позже начала' });
       return;
     }

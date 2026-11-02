@@ -88,7 +88,7 @@ export async function ensureWeek(env: Env, week: string): Promise<void> {
  * Сохранить новый график: создать недостающих учеников и пересоздать будущие уроки.
  * Прошедшие уроки, отмены и ручные правки не трогаются.
  */
-export async function saveTemplate(env: Env, text: string): Promise<{ created: string[]; lessons: number }> {
+export async function saveTemplate(env: Env, text: string, applyFrom: 'this' | 'next' = 'this'): Promise<{ created: string[]; lessons: number }> {
   const { items } = parse(text);
   const now = Date.now();
 
@@ -110,10 +110,15 @@ export async function saveTemplate(env: Env, text: string): Promise<{ created: s
   const fillFrom = firstWeek === weekKeyOf(now) ? weekRange(firstWeek)[0] : now;
 
   // 3. Удалить будущие автоматические уроки и создать заново по новому графику
-  await env.DB.prepare("DELETE FROM classes WHERE starts_at > ? AND manual = 0 AND edited = 0 AND status = 'planned'").bind(now).run();
+  //    (с этой недели или только со следующей — текущая неделя тогда не меняется)
   const thisWeek = weekKeyOf(now);
-  const { results: weeks } = await env.DB.prepare('SELECT week FROM class_weeks WHERE week >= ?').bind(thisWeek).all<{ week: string }>();
-  const toGen = new Set([thisWeek, ...weeks.map((w) => w.week)]);
+  const startWeek = applyFrom === 'next' ? addWeeks(thisWeek, 1) : thisWeek;
+  if (applyFrom === 'next') await ensureWeek(env, thisWeek); // зафиксировать текущую неделю по старому графику
+  await env.DB.prepare("DELETE FROM classes WHERE starts_at > ? AND week >= ? AND manual = 0 AND edited = 0 AND status = 'planned'")
+    .bind(now, startWeek)
+    .run();
+  const { results: weeks } = await env.DB.prepare('SELECT week FROM class_weeks WHERE week >= ?').bind(startWeek).all<{ week: string }>();
+  const toGen = new Set([startWeek, ...weeks.map((w) => w.week)]);
   for (const w of toGen) await generate(env, w, items, w === thisWeek ? fillFrom : now, students);
 
   return { created, lessons: items.filter((i) => i.kind === 'lesson').length };

@@ -1079,14 +1079,18 @@ async function pageTemplate() {
           <li><code>Понедельник</code> — день недели</li>
           <li><code>10:00 Мария 350</code> — урок: время, имя, цена</li>
           <li><code>11:00</code> — свободное окно</li>
-          <li><code>9:00 — 12:00</code> — свободное время; <code>9:00 — 12:00 занято</code> — занято</li>
+          <li><code>9:00 — 12:00</code> — свободно с 9:00 до 13:00 (время = начало часа)</li>
+          <li><code>15:00 — 16:00 Иван 600</code> — урок на 2 часа, 15:00–17:00</li>
+          <li><code>9:00 — 12:00 занято</code> — занятое время</li>
           <li>Одно имя = один ученик. Разных с одинаковым именем пиши с буквой: <code>София К.</code></li>
         </ul>
         Новые имена станут учениками автоматически.</div>
     </details>
     <textarea class="input tpl" id="tpl" spellcheck="false" placeholder="${esc(TEMPLATE_HELP)}">${esc(text)}</textarea>
     <div id="preview"></div>
-    <div class="save-bar"><button class="btn block big" id="save">Сохранить график</button></div>
+    <div class="save-bar">
+      ${text ? `<div class="segmented" id="apply" style="margin-bottom:8px"><button class="on" data-v="this">С этой недели</button><button data-v="next">Со следующей недели</button></div>` : ''}
+      <button class="btn block big" id="save">Сохранить график</button></div>
     ${updated_at ? `<p class="small muted" style="text-align:center">Последнее изменение: ${fmtWhen(updated_at)}</p>` : ''}`;
 
   const ta = $('#tpl');
@@ -1105,6 +1109,19 @@ async function pageTemplate() {
     if (parsed.errors.length) {
       h += `<div class="card error-card"><b>⚠️ Не понял ${parsed.errors.length} ${plural(parsed.errors.length, 'строку', 'строки', 'строк')}:</b>${parsed.errors
         .map((e) => `<div class="err-line"><code>${e.line}: ${esc(e.text.trim())}</code><span>${esc(e.message)}</span></div>`)
+        .join('')}</div>`;
+    }
+    // Одно имя с разными ценами — возможно, это разные ученики
+    const prices = new Map();
+    for (const l of lessons) {
+      const k = l.name.trim().toLowerCase();
+      if (!prices.has(k)) prices.set(k, { name: l.name, set: new Set() });
+      prices.get(k).set.add(l.price);
+    }
+    const mixed = [...prices.values()].filter((p) => p.set.size > 1);
+    if (mixed.length) {
+      h += `<div class="card warn-card">${mixed
+        .map((p) => `<div>💡 <b>${esc(p.name)}</b> встречается с разной ценой (${[...p.set].join(' и ')} ₴). Если это <b>разные ученики</b> — допиши букву, например «${esc(p.name)} К.». Если один — всё в порядке.</div>`)
         .join('')}</div>`;
     }
     if (lessons.length) {
@@ -1137,6 +1154,10 @@ async function pageTemplate() {
   autosize();
   update();
 
+  $('#apply')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (b) $$('#apply button').forEach((x) => x.classList.toggle('on', x === b));
+  });
   $('#save').onclick = async () => {
     if (parsed.errors.length) {
       // Выделяем первую ошибочную строку прямо в тексте и показываем список ошибок
@@ -1150,7 +1171,8 @@ async function pageTemplate() {
     }
     $('#save').disabled = true;
     try {
-      const r = await api('/template', { method: 'PUT', body: { text: ta.value } });
+      const apply = $('#apply .on')?.dataset.v ?? 'this';
+      const r = await api('/template', { method: 'PUT', body: { text: ta.value, apply } });
       toast(r.created.length ? `Сохранено. Добавлено учеников: ${r.created.length}` : 'График сохранён ✓');
       location.hash = '#/schedule';
     } catch (err) {

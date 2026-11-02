@@ -459,7 +459,7 @@ route('PUT', '/template', async (env, _req, _p, body) => {
   const text = str(body.text, 20000) ?? '';
   const { errors } = parse(text);
   if (errors.length) return json({ error: `Есть ошибки в строках: ${errors.map((e) => e.line).join(', ')}`, errors }, { status: 400 });
-  return json(await saveTemplate(env, text));
+  return json(await saveTemplate(env, text, body.apply === 'next' ? 'next' : 'this'));
 });
 
 route('GET', '/week', async (env, req) => {

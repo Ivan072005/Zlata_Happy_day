@@ -379,3 +379,5 @@ textarea.tpl {
 
 .stats.three .stat-value { font-size: clamp(15px, 4.8vw, 20px); white-space: nowrap; }
 .stats.three .stat { min-width: 0; overflow: hidden; }
+
+.warn-card { margin-top: 12px; border-color: var(--amber); background: var(--amber-soft); font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
