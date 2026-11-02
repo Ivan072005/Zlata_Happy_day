@@ -1,8 +1,11 @@
-// Постоянный график → конкретные уроки по неделям, оплаты и баланс.
+// Постоянный график → график каждой недели (текст) → конкретные уроки; оплаты и баланс.
+//
+// У каждой недели свой текст в том же формате, что и постоянный график.
+// Новая неделя начинается с копии постоянного графика; правки недели действуют только на неё.
+// Уроки (таблица classes) всегда пересобираются из текста недели.
 import { parseSchedule } from '../public/parser.js';
 import type { Env } from './types';
 import { addWeeks, slotMs, weekKeyOf, weekRange } from './time';
-
 
 export interface Slot {
   day: number;
@@ -11,6 +14,7 @@ export interface Slot {
   kind: 'lesson' | 'free' | 'busy';
   name?: string;
   price?: number;
+  cancelled?: boolean;
   line: number;
 }
 
@@ -27,6 +31,13 @@ export interface ClassRow {
   note: string | null;
 }
 
+export interface WeekText {
+  week: string;
+  text: string;
+  edited: number;
+  updated_at: number;
+}
+
 export function parse(text: string): { items: Slot[]; errors: { line: number; text: string; message: string }[] } {
   return parseSchedule(text) as any;
 }
@@ -35,9 +46,9 @@ export async function getTemplate(env: Env) {
   return env.DB.prepare('SELECT * FROM templates ORDER BY id DESC LIMIT 1').first<{ id: number; text: string; created_at: number }>();
 }
 
-const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е');
+export const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е');
 
-/** Имя из графика → ученик (только активные). */
+/** Имя → ученик (только активные). */
 async function studentMap(env: Env): Promise<Map<string, number>> {
   const { results } = await env.DB.prepare('SELECT id, name FROM students WHERE archived = 0').all<{ id: number; name: string }>();
   const m = new Map<string, number>();
@@ -45,86 +56,118 @@ async function studentMap(env: Env): Promise<Map<string, number>> {
   return m;
 }
 
-/** Создать уроки недели из графика (только те, что начинаются после `from`). */
-async function generate(env: Env, week: string, slots: Slot[], from: number, students: Map<string, number>) {
-  const existing = await env.DB.prepare('SELECT student_id, starts_at FROM classes WHERE week = ?').bind(week).all<{ student_id: number; starts_at: number }>();
-  const taken = new Set(existing.results.map((r) => `${r.student_id}:${r.starts_at}`));
-  const stmts: D1PreparedStatement[] = [];
-  for (const s of slots) {
-    if (s.kind !== 'lesson' || !s.name) continue;
-    const sid = students.get(norm(s.name));
-    if (!sid) continue;
-    const start = slotMs(week, s.day, s.start);
-    if (start < from || taken.has(`${sid}:${start}`)) continue;
-    stmts.push(
-      env.DB.prepare('INSERT INTO classes (student_id, week, starts_at, ends_at, price, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(
-        sid,
-        week,
-        start,
-        slotMs(week, s.day, s.end),
-        s.price ?? 0,
-        Date.now(),
-      ),
-    );
-  }
-  stmts.push(env.DB.prepare('INSERT OR IGNORE INTO class_weeks (week) VALUES (?)').bind(week));
-  await env.DB.batch(stmts);
-}
-
-/** Гарантирует, что уроки недели созданы из текущего графика. */
-export async function ensureWeek(env: Env, week: string): Promise<void> {
-  const done = await env.DB.prepare('SELECT 1 FROM class_weeks WHERE week = ?').bind(week).first();
-  if (done) return;
-  const tpl = await getTemplate(env);
-  if (!tpl) return;
-  const first = await env.DB.prepare('SELECT MIN(created_at) AS t FROM templates').first<{ t: number }>();
-  const startFrom = weekRange(weekKeyOf(first!.t))[0];
-  const [, end] = weekRange(week);
-  if (end <= startFrom) return; // недели до начала работы с графиком — не выдумываем прошлые уроки
-  await generate(env, week, parse(tpl.text).items, startFrom, await studentMap(env));
-}
-
-/**
- * Сохранить новый график: создать недостающих учеников и пересоздать будущие уроки.
- * Прошедшие уроки, отмены и ручные правки не трогаются.
- */
-export async function saveTemplate(env: Env, text: string, applyFrom: 'this' | 'next' = 'this'): Promise<{ created: string[]; lessons: number }> {
-  const { items } = parse(text);
-  const now = Date.now();
-
-  // 1. Новые ученики
+/** Создаёт учеников для новых имён. Возвращает карту имён и список созданных. */
+async function withStudents(env: Env, items: Slot[]) {
   const students = await studentMap(env);
   const created: string[] = [];
   for (const s of items) {
     if (s.kind !== 'lesson' || !s.name || students.has(norm(s.name))) continue;
-    const res = await env.DB.prepare("INSERT INTO students (name, level, created_at) VALUES (?, 'B1', ?)").bind(s.name, now).run();
+    const res = await env.DB.prepare("INSERT INTO students (name, level, created_at) VALUES (?, 'B1', ?)").bind(s.name, Date.now()).run();
     students.set(norm(s.name), Number(res.meta.last_row_id));
     created.push(s.name);
   }
-
-  // 2. Сохранить версию графика
-  const first = await env.DB.prepare('SELECT MIN(created_at) AS t FROM templates').first<{ t: number | null }>();
-  await env.DB.prepare('INSERT INTO templates (text, created_at) VALUES (?, ?)').bind(text, now).run();
-  // В первую неделю работы с графиком заполняем неделю целиком (уроки с начала недели тоже были)
-  const firstWeek = weekKeyOf(first?.t ?? now);
-  const fillFrom = firstWeek === weekKeyOf(now) ? weekRange(firstWeek)[0] : now;
-
-  // 3. Удалить будущие автоматические уроки и создать заново по новому графику
-  //    (с этой недели или только со следующей — текущая неделя тогда не меняется)
-  const thisWeek = weekKeyOf(now);
-  const startWeek = applyFrom === 'next' ? addWeeks(thisWeek, 1) : thisWeek;
-  if (applyFrom === 'next') await ensureWeek(env, thisWeek); // зафиксировать текущую неделю по старому графику
-  await env.DB.prepare("DELETE FROM classes WHERE starts_at > ? AND week >= ? AND manual = 0 AND edited = 0 AND status = 'planned'")
-    .bind(now, startWeek)
-    .run();
-  const { results: weeks } = await env.DB.prepare('SELECT week FROM class_weeks WHERE week >= ?').bind(startWeek).all<{ week: string }>();
-  const toGen = new Set([startWeek, ...weeks.map((w) => w.week)]);
-  for (const w of toGen) await generate(env, w, items, w === thisWeek ? fillFrom : now, students);
-
-  return { created, lessons: items.filter((i) => i.kind === 'lesson').length };
+  return { students, created };
 }
 
-export { addWeeks, weekKeyOf };
+/** Пересобрать уроки недели из её текста. */
+async function rebuildWeek(env: Env, week: string, text: string, students: Map<string, number>) {
+  const stmts: D1PreparedStatement[] = [env.DB.prepare('DELETE FROM classes WHERE week = ?').bind(week)];
+  for (const s of parse(text).items) {
+    if (s.kind !== 'lesson' || !s.name) continue;
+    const sid = students.get(norm(s.name));
+    if (!sid) continue;
+    stmts.push(
+      env.DB.prepare('INSERT INTO classes (student_id, week, starts_at, ends_at, price, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(
+        sid,
+        week,
+        slotMs(week, s.day, s.start),
+        slotMs(week, s.day, s.end),
+        s.price ?? 0,
+        s.cancelled ? 'cancelled' : 'planned',
+        Date.now(),
+      ),
+    );
+  }
+  await env.DB.batch(stmts);
+}
+
+/** Первая неделя, с которой ведётся график (раньше уроки не выдумываем). */
+async function firstWeek(env: Env): Promise<string | null> {
+  const first = await env.DB.prepare('SELECT MIN(created_at) AS t FROM templates').first<{ t: number | null }>();
+  return first?.t ? weekKeyOf(first.t) : null;
+}
+
+/** График недели: существующий или копия постоянного графика (тогда же создаются уроки). */
+export async function getWeek(env: Env, week: string): Promise<WeekText | null> {
+  const row = await env.DB.prepare('SELECT * FROM week_texts WHERE week = ?').bind(week).first<WeekText>();
+  if (row) return row;
+  const [tpl, fw] = await Promise.all([getTemplate(env), firstWeek(env)]);
+  if (!tpl || !fw || week < fw) return null;
+  const { students } = await withStudents(env, parse(tpl.text).items);
+  const ins = await env.DB.prepare('INSERT OR IGNORE INTO week_texts (week, text, edited, updated_at) VALUES (?, ?, 0, ?)')
+    .bind(week, tpl.text, Date.now())
+    .run();
+  if (ins.meta.changes) await rebuildWeek(env, week, tpl.text, students);
+  return env.DB.prepare('SELECT * FROM week_texts WHERE week = ?').bind(week).first<WeekText>();
+}
+
+/** Для совместимости: убедиться, что уроки недели существуют. */
+export async function ensureWeek(env: Env, week: string): Promise<void> {
+  await getWeek(env, week);
+}
+
+/** Сохранить график конкретной недели (только для неё). */
+export async function saveWeek(env: Env, week: string, text: string) {
+  const { students, created } = await withStudents(env, parse(text).items);
+  await env.DB.prepare(
+    'INSERT INTO week_texts (week, text, edited, updated_at) VALUES (?, ?, 1, ?) ON CONFLICT(week) DO UPDATE SET text = excluded.text, edited = 1, updated_at = excluded.updated_at',
+  )
+    .bind(week, text, Date.now())
+    .run();
+  await rebuildWeek(env, week, text, students);
+  return { created };
+}
+
+/** Вернуть неделю к постоянному графику. */
+export async function resetWeek(env: Env, week: string) {
+  const tpl = await getTemplate(env);
+  if (!tpl) return;
+  const { students } = await withStudents(env, parse(tpl.text).items);
+  await env.DB.prepare(
+    'INSERT INTO week_texts (week, text, edited, updated_at) VALUES (?, ?, 0, ?) ON CONFLICT(week) DO UPDATE SET text = excluded.text, edited = 0, updated_at = excluded.updated_at',
+  )
+    .bind(week, tpl.text, Date.now())
+    .run();
+  await rebuildWeek(env, week, tpl.text, students);
+}
+
+/**
+ * Сохранить постоянный график. Недели с этой (или со следующей) и дальше, которые не меняли вручную,
+ * обновляются. Изменённые вручную недели не трогаются — их список возвращается.
+ */
+export async function saveTemplate(env: Env, text: string, applyFrom: 'this' | 'next' = 'this') {
+  const { items } = parse(text);
+  const { students, created } = await withStudents(env, items);
+  const thisWeek = weekKeyOf(Date.now());
+  if (applyFrom === 'next') await getWeek(env, thisWeek); // зафиксировать текущую неделю по старому графику
+  await env.DB.prepare('INSERT INTO templates (text, created_at) VALUES (?, ?)').bind(text, Date.now()).run();
+
+  const startWeek = applyFrom === 'next' ? addWeeks(thisWeek, 1) : thisWeek;
+  const { results } = await env.DB.prepare('SELECT week, edited FROM week_texts WHERE week >= ?').bind(startWeek).all<{ week: string; edited: number }>();
+  const kept: string[] = [];
+  for (const w of results) {
+    if (w.edited) {
+      kept.push(w.week);
+      continue;
+    }
+    await env.DB.prepare('UPDATE week_texts SET text = ?, updated_at = ? WHERE week = ?').bind(text, Date.now(), w.week).run();
+    await rebuildWeek(env, w.week, text, students);
+  }
+  await getWeek(env, startWeek);
+  return { created, kept, lessons: items.filter((i) => i.kind === 'lesson').length };
+}
+
+export { addWeeks, weekKeyOf, weekRange };
 
 // ───────── Оплата: распределение денег по урокам ─────────
 

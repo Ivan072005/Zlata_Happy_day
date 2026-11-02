@@ -1,5 +1,5 @@
 // Панель преподавателя. Без сборки и зависимостей: обычный JS.
-import { parseSchedule, DAY_NAMES } from '/parser.js';
+import { parseSchedule, DAY_NAMES, formatLine, dayIndex } from '/parser.js';
 
 const LEVELS = ['A1', 'A2', 'B1', 'B2', 'C1'];
 const STATUS = {
@@ -207,6 +207,7 @@ const routes = [
   [/^#?\/?$/, pageHome, 'home'],
   [/^#\/schedule(?:\/(\d{4}-\d{2}-\d{2}))?$/, pageSchedule, 'schedule'],
   [/^#\/template$/, pageTemplate, 'schedule'],
+  [/^#\/week-text\/(\d{4}-\d{2}-\d{2})$/, pageWeekText, 'schedule'],
   [/^#\/students$/, pageStudents, 'students'],
   [/^#\/students\/(\d+)$/, pageStudent, 'students'],
   [/^#\/sessions\/(\d+)$/, pageSession, 'students'],
@@ -350,7 +351,7 @@ async function pageHome() {
   $('#view').innerHTML = html;
   const all = [...d.open, ...d.upcoming, ...d.recent_lessons];
   $$('#view [data-lesson]').forEach((el) => (el.onclick = () => openLessonDetails(null, all.find((l) => l.id === Number(el.dataset.lesson)))));
-  $$('#view [data-class]').forEach((el) => (el.onclick = () => openClassSheet(d.classes_next.find((c) => c.id === Number(el.dataset.class)))));
+  $$('#view [data-class]').forEach((el) => (el.onclick = () => (location.hash = `#/schedule/${d.classes_next.find((c) => c.id === Number(el.dataset.class)).week}`)));
 }
 
 // ───────── Ученики ─────────
@@ -602,7 +603,7 @@ async function pageStudent(id) {
         render();
       } else if (e.target.closest('[data-class]')) {
         const c = data.finance.classes.find((x) => x.id === Number(e.target.closest('[data-class]').dataset.class));
-        openClassSheet({ ...c, student_name: s.name });
+        location.hash = `#/schedule/${c.week}`;
       }
       else if (a === 'archive') {
         await api(`/students/${s.id}`, { method: 'PATCH', body: { archived: !s.archived } });
@@ -890,36 +891,97 @@ async function openPaymentSheet(student, finance = null, defaults = {}) {
   });
 }
 
-/** Окно урока: оплата, отмена, цена. */
-function openClassSheet(c) {
-  if (!c) return;
-  const cancelled = c.status === 'cancelled';
+/** Свободное окно / занятое время из графика. */
+function slotRow(s, attrs = '') {
+  const long = toMinutesStr(s.end) - toMinutesStr(s.start) > 60;
+  const label = s.kind === 'free' ? (long ? `свободно до ${s.end}` : 'свободно') : `занято до ${s.end}`;
+  return `<div class="row sched slot ${s.kind}" ${attrs}><div class="sched-time"><b>${s.start}</b></div>
+    <div class="row-main"><div class="row-sub">${label}</div></div>${s.kind === 'free' && attrs ? '<div class="row-end small">+ урок</div>' : ''}</div>`;
+}
+const toMinutesStr = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+const fromMinutesStr = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const DURATIONS = [60, 90, 120, 150, 180];
+const durLabel = (m) => (m % 60 ? `${Math.floor(m / 60)},5 ч` : `${m / 60} ч`);
+
+// ───────── Расписание недели (реальные уроки) ─────────
+// У каждой недели свой текст (копия постоянного графика). Любая правка здесь меняет только эту неделю.
+
+let schedStudents = [];
+
+/** Применить правку к тексту недели и сохранить. */
+async function saveWeekLines(d, mutate, okText = 'Сохранено ✓') {
+  const lines = d.text.split('\n');
+  mutate(lines);
+  const text = lines.join('\n');
+  const { errors } = parseSchedule(text);
+  if (errors.length) throw new Error(`Не получилось: ${errors[0].message}`);
+  const r = await api('/week', { method: 'PUT', body: { week: d.week, text } });
+  toast(r.created?.length ? `${okText} Новый ученик: ${r.created.join(', ')}` : okText);
+  render();
+}
+
+/** Вставить строку в нужный день (по времени). */
+function insertLine(lines, items, day, start, text) {
+  const dayItems = items.filter((i) => i.day === day);
+  const after = dayItems.filter((i) => toMinutesStr(i.start) <= toMinutesStr(start)).pop();
+  if (after) return lines.splice(after.line, 0, text);
+  if (dayItems.length) return lines.splice(dayItems[0].line - 1, 0, text);
+  const header = lines.findIndex((l) => dayIndex(l) === day);
+  if (header >= 0) return lines.splice(header + 1, 0, text);
+  lines.push('', DAY_NAMES[day], text);
+}
+
+function studentsDatalist() {
+  return `<datalist id="students-dl">${schedStudents.map((s) => `<option value="${esc(s.name)}">`).join('')}</datalist>`;
+}
+
+function lessonFields(it, { withDay = false } = {}) {
+  const dur = it.end ? toMinutesStr(it.end) - toMinutesStr(it.start) : 60;
+  const durs = DURATIONS.includes(dur) ? DURATIONS : [...DURATIONS, dur].sort((a, b) => a - b);
+  return `
+    ${withDay ? `<label class="field"><span>День</span><select class="input" name="day">${DAY_NAMES.map((n, i) => `<option value="${i}" ${i === it.day ? 'selected' : ''}>${n}</option>`).join('')}</select></label>` : ''}
+    <label class="field"><span>Ученик</span><input class="input" name="name" list="students-dl" required maxlength="80" value="${esc(it.name ?? '')}" placeholder="Имя (новое имя станет учеником)" autocomplete="off"></label>
+    ${studentsDatalist()}
+    <div class="grid-3">
+      <label class="field"><span>Начало</span><input class="input" type="time" name="start" step="300" value="${it.start}" required></label>
+      <label class="field"><span>Длительность</span><select class="input" name="dur">${durs.map((m) => `<option value="${m}" ${m === dur ? 'selected' : ''}>${durLabel(m)}</option>`).join('')}</select></label>
+      <label class="field"><span>Цена, ₴</span><input class="input" type="number" name="price" min="0" required inputmode="numeric" value="${it.price ?? ''}" placeholder="350"></label>
+    </div>`;
+}
+
+const lineFromForm = (f, extra = {}) => {
+  const start = f.start.slice(0, 5);
+  return formatLine({ kind: 'lesson', start, end: fromMinutesStr(toMinutesStr(start) + Number(f.dur)), name: f.name.trim(), price: Number(f.price), ...extra });
+};
+
+/** Последняя цена ученика в этой неделе (для подсказки). */
+function priceOf(d, name) {
+  const n = name.trim().toLowerCase();
+  return d.items.find((i) => i.kind === 'lesson' && i.name.trim().toLowerCase() === n)?.price ?? '';
+}
+
+/** Урок недели: всё редактируется. */
+function openLessonItem(d, it) {
   const { el, close } = sheet(
-    c.student_name,
-    `<div class="card">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><b>${dayLabel(c.starts_at)}, ${fmtTime(c.starts_at)}–${fmtTime(c.ends_at)}</b>${payBadge(c)}</div>
-      <div class="small muted mt">${money(c.price)}${c.manual ? ' · разовый урок' : ' · из постоянного графика'}${c.pay?.state === 'partial' ? ` · оплачено ${money(c.pay.covered)}` : ''}</div>
-    </div>
-    <form id="f-class" class="card mt">
-      <div class="grid-2">
-        <label class="field" style="margin:0"><span>Цена этого урока, ₴</span><input class="input" type="number" name="price" min="0" value="${c.price}" inputmode="numeric"></label>
-        <label class="field" style="margin:0"><span>Заметка</span><input class="input" name="note" maxlength="200" value="${esc(c.note ?? '')}" placeholder="перенос, замена…"></label>
-      </div>
-      <button class="btn secondary block mt" type="submit">Сохранить</button>
+    `${DAY_NAMES[it.day]}, ${it.start}`,
+    `${it.cancelled ? '' : `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>${esc(it.name)}</b>${itemPayBadge(d, it)}</div>`}
+    <form id="f-item" class="${it.cancelled ? '' : 'mt'}">
+      ${lessonFields(it)}
+      <div class="switch-row" style="padding-top:0"><div><b>Отменён</b><small>Отменённый урок не считается и не оплачивается</small></div>
+        <label class="switch"><input type="checkbox" name="cancelled" ${it.cancelled ? 'checked' : ''}><span></span></label></div>
+      <button class="btn block big mt" type="submit">Сохранить</button>
     </form>
-    <div class="row-gap mt">
-      ${cancelled ? '' : `<button class="btn block" data-a="pay">💰 Внести оплату</button>`}
-      <button class="btn ghost block" data-a="cancel">${cancelled ? '↩︎ Вернуть урок' : '❌ Отменить урок (не считать)'}</button>
-      <button class="btn ghost block" data-a="practice">🤖 Открыть практику с ботом</button>
-      <a class="btn ghost block" href="#/students/${c.student_id}">Карточка ученика</a>
-      ${c.manual ? '<button class="btn danger block" data-a="delete">Удалить урок</button>' : ''}
+    <p class="small muted">Изменения — только для этой недели. Следующие недели — по постоянному графику.</p>
+    <div class="row-gap">
+      ${it.student_id && !it.cancelled ? `<button class="btn secondary block" data-a="pay">💰 Внести оплату</button>` : ''}
+      <button class="btn ghost block" data-a="free">🕳 Освободить окно (убрать урок)</button>
+      ${it.student_id ? `<button class="btn ghost block" data-a="practice">🤖 Открыть практику с ботом</button>
+      <a class="btn ghost block" href="#/students/${it.student_id}">Карточка ученика</a>` : ''}
     </div>`,
   );
-  onSubmit($('#f-class', el), async (f) => {
-    await api(`/classes/${c.id}`, { method: 'PATCH', body: { price: Number(f.price), note: f.note } });
+  onSubmit($('#f-item', el), async (f) => {
+    await saveWeekLines(d, (lines) => (lines[it.line - 1] = lineFromForm(f, { cancelled: !!f.cancelled })));
     close();
-    toast('Сохранено ✓');
-    render();
   });
   el.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-a]')?.dataset.a;
@@ -927,20 +989,14 @@ function openClassSheet(c) {
     try {
       if (a === 'pay') {
         close();
-        openPaymentSheet({ id: c.student_id, name: c.student_name }, null, { amount: c.pay ? c.price - c.pay.covered : c.price });
-      } else if (a === 'cancel') {
-        await api(`/classes/${c.id}`, { method: 'PATCH', body: { status: cancelled ? 'planned' : 'cancelled' } });
+        openPaymentSheet({ id: it.student_id, name: it.name }, null, { amount: it.pay ? it.price - it.pay.covered : it.price });
+      } else if (a === 'free') {
+        if (!confirm(`Убрать урок ${it.name} в ${it.start} на этой неделе? Окно станет свободным.`)) return;
+        await saveWeekLines(d, (lines) => (lines[it.line - 1] = formatLine({ kind: 'free', start: it.start, end: it.end })), 'Окно освобождено ✓');
         close();
-        toast(cancelled ? 'Урок возвращён' : 'Урок отменён — он не будет считаться');
-        render();
       } else if (a === 'practice') {
         close();
-        openLessonForm((await api(`/students/${c.student_id}`)).student);
-      } else if (a === 'delete' && confirm('Удалить разовый урок?')) {
-        await api(`/classes/${c.id}`, { method: 'DELETE' });
-        close();
-        toast('Удалено');
-        render();
+        openLessonForm((await api(`/students/${it.student_id}`)).student);
       }
     } catch (err) {
       if (!(err instanceof AuthError)) toast(err.message);
@@ -948,49 +1004,88 @@ function openClassSheet(c) {
   });
 }
 
-/** Разовый урок (вне постоянного графика). */
-async function openAddClass(defaults = {}) {
-  const { students } = await api('/students');
-  const active = students.filter((s) => !s.archived);
-  if (!active.length) return toast('Сначала добавь ученика');
-  const start = defaults.start ?? Math.ceil(Date.now() / 3600000) * 3600000;
+/** Свободное окно: поставить туда урок. */
+function openFreeItem(d, it) {
+  const winStart = toMinutesStr(it.start), winEnd = toMinutesStr(it.end);
   const { el, close } = sheet(
-    'Разовый урок',
-    `<form id="f-add-class">
-      <label class="field"><span>Ученик</span><select class="input" name="student_id">${active.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></label>
-      <div class="dates">
-        <label class="field" style="margin:0"><span>Начало</span><input class="input" type="datetime-local" name="start" value="${toLocalInput(start)}" required></label>
-        <label class="field" style="margin:0"><span>Длительность</span><select class="input" name="dur"><option value="45">45 мин</option><option value="60" selected>1 час</option><option value="90">1,5 часа</option><option value="120">2 часа</option></select></label>
-      </div>
-      <label class="field mt"><span>Цена, ₴</span><input class="input" type="number" name="price" min="0" required inputmode="numeric" placeholder="350"></label>
-      <label class="field"><span>Заметка</span><input class="input" name="note" maxlength="200" placeholder="перенос с понедельника, доп. урок…"></label>
-      <p class="small muted" style="margin-top:0">Постоянные уроки добавляются через «Постоянный график». Здесь — переносы и дополнительные уроки.</p>
-      <button class="btn block big" type="submit">Добавить урок</button>
-    </form>`,
+    `Свободно · ${DAY_NAMES[it.day]}`,
+    `<p class="muted" style="margin-top:0">Окно ${it.start}–${it.end}. Поставь сюда урок — только на эту неделю.</p>
+    <form id="f-free">
+      ${lessonFields({ day: it.day, start: it.start, end: fromMinutesStr(Math.min(winStart + 60, winEnd > winStart ? Math.max(winStart + 60, 0) : winStart + 60)) })}
+      <button class="btn block big mt" type="submit">Поставить урок</button>
+    </form>
+    ${it.kind === 'free' ? `<button class="btn ghost block mt" data-a="busy">Отметить как занятое</button>` : `<button class="btn ghost block mt" data-a="unbusy">Сделать свободным</button>`}`,
   );
-  onSubmit($('#f-add-class', el), async (f) => {
-    const s = fromLocalInput(f.start);
-    await api('/classes', { method: 'POST', body: { student_id: Number(f.student_id), starts_at: s, ends_at: s + Number(f.dur) * 60000, price: Number(f.price), note: f.note } });
+  const nameInput = $('[name=name]', el), priceInput = $('[name=price]', el);
+  nameInput.addEventListener('change', () => {
+    if (!priceInput.value) priceInput.value = priceOf(d, nameInput.value);
+  });
+  onSubmit($('#f-free', el), async (f) => {
+    const s = toMinutesStr(f.start.slice(0, 5)), e = s + Number(f.dur);
+    await saveWeekLines(
+      d,
+      (lines) => {
+        // Урок + оставшиеся свободные части окна до и после
+        const parts = [];
+        if (s > winStart) parts.push(formatLine({ kind: 'free', start: it.start, end: fromMinutesStr(s) }));
+        parts.push(lineFromForm(f));
+        if (e < winEnd) parts.push(formatLine({ kind: 'free', start: fromMinutesStr(e), end: it.end }));
+        lines.splice(it.line - 1, 1, ...parts);
+      },
+      'Урок поставлен ✓',
+    );
     close();
-    toast('Урок добавлен ✓');
-    render();
+  });
+  el.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-a]')?.dataset.a;
+    try {
+      if (a === 'busy' || a === 'unbusy') {
+        await saveWeekLines(d, (lines) => (lines[it.line - 1] = formatLine({ ...it, kind: a === 'busy' ? 'busy' : 'free' })));
+        close();
+      }
+    } catch (err) {
+      if (!(err instanceof AuthError)) toast(err.message);
+    }
   });
 }
 
-/** Свободное окно / занятое время из графика. */
-function slotRow(s) {
-  const long = toMinutesStr(s.end) - toMinutesStr(s.start) > 60;
-  const label = s.kind === 'free' ? (long ? `свободно до ${s.end}` : 'свободно') : `занято до ${s.end}`;
-  return `<div class="row sched slot ${s.kind}"><div class="sched-time"><b>${s.start}</b></div>
-    <div class="row-main"><div class="row-sub">${label}</div></div></div>`;
+/** Новый урок в эту неделю (в любой день и время). */
+function openAddItem(d) {
+  const today = (new Date().getDay() + 6) % 7;
+  const { el, close } = sheet(
+    'Урок на эту неделю',
+    `<form id="f-add">
+      ${lessonFields({ day: d.week === d.current ? today : 0, start: '18:00', end: '19:00' }, { withDay: true })}
+      <p class="small muted" style="margin-top:0">Добавится только в эту неделю. Чтобы урок был каждую неделю — добавь его в постоянный график.</p>
+      <button class="btn block big" type="submit">Добавить</button>
+    </form>`,
+  );
+  const nameInput = $('[name=name]', el), priceInput = $('[name=price]', el);
+  nameInput.addEventListener('change', () => {
+    if (!priceInput.value) priceInput.value = priceOf(d, nameInput.value);
+  });
+  onSubmit($('#f-add', el), async (f) => {
+    const start = f.start.slice(0, 5);
+    await saveWeekLines(d, (lines) => insertLine(lines, d.items, Number(f.day), start, lineFromForm(f)), 'Урок добавлен ✓');
+    close();
+  });
 }
-const toMinutesStr = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
-// ───────── Расписание (реальные уроки) ─────────
+function itemPayBadge(d, it) {
+  if (it.cancelled) return '<span class="badge">отменён</span>';
+  const [y, m, dd] = d.week.split('-').map(Number);
+  const startMs = new Date(y, m - 1, dd + it.day, ...it.start.split(':').map(Number)).getTime();
+  return payBadge({ status: 'planned', pay: it.pay, price: it.price, starts_at: startMs });
+}
+
 async function pageSchedule(week) {
-  const d = await api(`/week${week ? `?week=${week}` : ''}`);
-  setHeader({ title: 'Расписание', action: `<a class="btn secondary" style="min-height:38px;padding:6px 12px" href="#/template">✏️ График</a>` });
-  setFab('Урок', () => openAddClass());
+  const [d, st] = await Promise.all([api(`/week${week ? `?week=${week}` : ''}`), api('/students')]);
+  schedStudents = st.students.filter((s) => !s.archived);
+  setHeader({
+    title: 'Расписание',
+    action: `<a class="btn secondary" style="min-height:38px;padding:6px 12px" href="#/template">📋 Постоянный</a>`,
+  });
+  setFab('Урок', () => openAddItem(d));
 
   const from = new Date(`${d.week}T00:00:00`);
   const last = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 6);
@@ -998,9 +1093,10 @@ async function pageSchedule(week) {
     from.getMonth() === last.getMonth()
       ? `${from.getDate()}–${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}`
       : `${from.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} – ${last.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })}`;
-  const label = d.week === d.current ? 'эта неделя' : d.week > d.current ? (d.prev === d.current ? 'следующая неделя' : 'будущая неделя') : d.next === d.current ? 'прошлая неделя' : 'прошедшая неделя';
+  const label = d.week === d.current ? 'эта неделя' : d.prev === d.current ? 'следующая неделя' : d.next === d.current ? 'прошлая неделя' : d.week > d.current ? 'будущая неделя' : 'прошедшая неделя';
   const t = d.totals;
   const todayKey = new Date().toDateString();
+  const nowMs = Date.now();
 
   let html = `
     <div class="week-nav">
@@ -1011,52 +1107,77 @@ async function pageSchedule(week) {
     ${d.week !== d.current ? `<a class="link-btn" href="#/schedule" style="display:block;text-align:center;margin:0 0 8px">Вернуться к этой неделе</a>` : ''}`;
 
   if (!d.has_template) {
-    html += `<div class="card empty"><div class="emoji">🗓</div><b>Заполни постоянный график</b><br>Вставь его текстом, как в заметках, — уроки на каждую неделю появятся сами.
-      <div class="mt"><a class="btn" href="#/template">✏️ Заполнить график</a></div></div>`;
+    html += `<div class="card empty"><div class="emoji">🗓</div><b>Заполни постоянный график</b><br>Вставь его текстом, как в заметках, — каждая неделя будет начинаться с него.
+      <div class="mt"><a class="btn" href="#/template">📋 Заполнить график</a></div></div>`;
+    $('#view').innerHTML = html;
+    return;
+  }
+  if (!d.text) {
+    html += `<div class="card empty"><div class="emoji">🗓</div>Эта неделя раньше, чем начат график.</div>`;
+    $('#view').innerHTML = html;
+    return;
   }
 
   html += `<div class="stats three">
       <div class="stat"><div class="stat-value">${t.lessons}</div><div class="stat-label">${plural(t.lessons, 'урок', 'урока', 'уроков')}${t.cancelled ? ` · ${t.cancelled} отм.` : ''}</div></div>
       <div class="stat"><div class="stat-value">${money(t.expected)}</div><div class="stat-label">ожидается</div></div>
       <div class="stat"><div class="stat-value green-text">${money(t.covered)}</div><div class="stat-label">оплачено</div></div>
+    </div>
+    <div class="week-actions">
+      ${d.edited ? `<span class="badge amber">✏️ неделя изменена</span><button class="link-btn" data-act="reset">↺ Вернуть как в постоянном</button>` : `<span class="small muted">По постоянному графику. Нажми на урок или окно, чтобы изменить только эту неделю.</span>`}
+      <a class="link-btn" href="#/week-text/${d.week}">✏️ Текстом</a>
     </div>`;
 
   for (let i = 0; i < 7; i++) {
     const day = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i);
-    const next = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i + 1);
-    const cls = d.classes.filter((c) => c.starts_at >= day.getTime() && c.starts_at < next.getTime());
-    // Свободные окна и занятое время из графика (только для текущей и будущих недель)
-    const nowMs = Date.now();
-    const extra =
-      d.week >= d.current
-        ? d.slots.filter((s) => {
-            if (s.day !== i) return false;
-            const [eh, em] = s.end.split(':').map(Number);
-            return new Date(day.getFullYear(), day.getMonth(), day.getDate(), eh, em).getTime() > nowMs; // прошедшие окна не показываем
-          })
-        : [];
-    const entries = [
-      ...cls.map((c) => ({ t: fmtTime(c.starts_at), html: classRow(c) })),
-      ...extra.map((s) => ({
-        t: s.start,
-        html: slotRow(s),
-      })),
-    ].sort((a, b) => a.t.localeCompare(b.t));
+    const items = d.items.filter((it) => it.day === i);
     const isToday = day.toDateString() === todayKey;
-    if (!entries.length && i >= 5) continue; // пустые выходные не показываем
+    const visible = items.filter((it) => {
+      if (it.kind === 'lesson') return true;
+      const [eh, em] = it.end.split(':').map(Number);
+      return new Date(day.getFullYear(), day.getMonth(), day.getDate(), eh, em).getTime() > nowMs; // прошедшие окна не показываем
+    });
+    if (!visible.length && i >= 5) continue;
+    const sum = items.filter((it) => it.kind === 'lesson' && !it.cancelled).reduce((a, it) => a + it.price, 0);
     html += `<div class="section-title day ${isToday ? 'today' : ''}"><span>${day.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })}${isToday ? ' · сегодня' : ''}</span>
-        <span class="small muted" style="font-weight:500">${cls.filter((c) => c.status === 'planned').length ? money(cls.filter((c) => c.status === 'planned').reduce((a, c) => a + c.price, 0)) : ''}</span></div>
-      ${entries.length ? `<div class="list">${entries.map((e) => e.html).join('')}</div>` : '<div class="day-empty">Нет уроков</div>'}`;
+        <span class="small muted" style="font-weight:500">${sum ? money(sum) : ''}</span></div>
+      ${
+        visible.length
+          ? `<div class="list">${visible
+              .map((it) =>
+                it.kind === 'lesson'
+                  ? `<div class="row sched ${it.cancelled ? 'cancelled' : ''}" data-line="${it.line}">
+                    <div class="sched-time"><b>${it.start}</b><span>${it.end}</span></div>
+                    <div class="row-main"><div class="row-title">${esc(it.name)}</div><div class="row-sub">${money(it.price)}</div></div>
+                    <div class="row-end">${itemPayBadge(d, it)}</div></div>`
+                  : slotRow(it, `data-line="${it.line}" style="cursor:pointer"`),
+              )
+              .join('')}</div>`
+          : '<div class="day-empty">Нет уроков</div>'
+      }`;
   }
 
   $('#view').innerHTML = html;
-  $('#view').onclick = (e) => {
-    const r = e.target.closest('[data-class]');
-    if (r) openClassSheet(d.classes.find((c) => c.id === Number(r.dataset.class)));
+  $('#view').onclick = async (e) => {
+    try {
+      if (e.target.closest('[data-act=reset]')) {
+        if (!confirm('Вернуть эту неделю как в постоянном графике? Ручные изменения недели пропадут (оплаты останутся).')) return;
+        await api('/week/reset', { method: 'POST', body: { week: d.week } });
+        toast('Неделя как в постоянном графике ✓');
+        return render();
+      }
+      const r = e.target.closest('[data-line]');
+      if (!r) return;
+      const it = d.items.find((x) => x.line === Number(r.dataset.line));
+      if (it.kind === 'lesson') openLessonItem(d, it);
+      else openFreeItem(d, it);
+    } catch (err) {
+      if (!(err instanceof AuthError)) toast(err.message);
+    }
   };
 }
 
-// ───────── Постоянный график (текст как в заметках) ─────────
+// ───────── Текст графика: постоянный или конкретной недели ─────────
 const TEMPLATE_HELP = `Понедельник
 10:00 Мария 350
 11:00
@@ -1066,13 +1187,34 @@ const TEMPLATE_HELP = `Понедельник
 9:00 — 12:00
 13:00 Макс 350`;
 
-async function pageTemplate() {
-  setHeader({ title: 'Постоянный график', back: '#/schedule' });
-  const [{ text, updated_at }, { students }] = await Promise.all([api('/template'), api('/students')]);
+function pageTemplate() {
+  return pageTextEditor('template');
+}
+function pageWeekText(week) {
+  return pageTextEditor('week', week);
+}
+
+async function pageTextEditor(mode, week = null) {
+  const isWeek = mode === 'week';
+  const [data, { students }] = await Promise.all([isWeek ? api(`/week?week=${week}`) : api('/template'), api('/students')]);
+  const text = data.text;
+  const updated_at = data.updated_at;
+  let title = 'Постоянный график';
+  if (isWeek) {
+    const from = new Date(`${week}T00:00:00`);
+    const last = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 6);
+    title = `Неделя ${from.getDate()}.${String(from.getMonth() + 1).padStart(2, '0')}–${last.getDate()}.${String(last.getMonth() + 1).padStart(2, '0')}`;
+  }
+  setHeader({ title, back: isWeek ? `#/schedule/${week}` : '#/schedule' });
   const known = new Set(students.filter((s) => !s.archived).map((s) => s.name.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е')));
 
   $('#view').innerHTML = `
-    <details class="card help" ${text ? '' : 'open'}>
+    ${
+      isWeek
+        ? `<div class="card info-card">Это график <b>только этой недели</b>. Отмены, переносы, замены — пиши сюда. Следующие недели начнутся с постоянного графика.</div>`
+        : `<div class="card info-card">Это <b>постоянный график</b> — каждая новая неделя начинается с него. Разовые изменения (отмены, замены) делай в расписании конкретной недели.</div>`
+    }
+    <details class="card help mt" ${text ? '' : 'open'}>
       <summary><b>Как заполнять</b></summary>
       <div class="small" style="margin-top:8px">Пиши как в заметках — можно просто вставить свои заметки целиком:
         <ul style="margin:6px 0;padding-left:18px">
@@ -1081,6 +1223,7 @@ async function pageTemplate() {
           <li><code>11:00</code> — свободное окно</li>
           <li><code>9:00 — 12:00</code> — свободно с 9:00 до 13:00 (время = начало часа)</li>
           <li><code>15:00 — 16:00 Иван 600</code> — урок на 2 часа, 15:00–17:00</li>
+          <li><code>17:00 Ева 350 отмена</code> — урок отменён (не считается)</li>
           <li><code>9:00 — 12:00 занято</code> — занятое время</li>
           <li>Одно имя = один ученик. Разных с одинаковым именем пиши с буквой: <code>София К.</code></li>
         </ul>
@@ -1089,8 +1232,8 @@ async function pageTemplate() {
     <textarea class="input tpl" id="tpl" spellcheck="false" placeholder="${esc(TEMPLATE_HELP)}">${esc(text)}</textarea>
     <div id="preview"></div>
     <div class="save-bar">
-      ${text ? `<div class="segmented" id="apply" style="margin-bottom:8px"><button class="on" data-v="this">С этой недели</button><button data-v="next">Со следующей недели</button></div>` : ''}
-      <button class="btn block big" id="save">Сохранить график</button></div>
+      ${!isWeek && text ? `<div class="segmented" id="apply" style="margin-bottom:8px"><button class="on" data-v="this">С этой недели</button><button data-v="next">Со следующей недели</button></div>` : ''}
+      <button class="btn block big" id="save">${isWeek ? 'Сохранить неделю' : 'Сохранить график'}</button></div>
     ${updated_at ? `<p class="small muted" style="text-align:center">Последнее изменение: ${fmtWhen(updated_at)}</p>` : ''}`;
 
   const ta = $('#tpl');
@@ -1099,9 +1242,10 @@ async function pageTemplate() {
     ta.style.height = Math.max(240, ta.scrollHeight + 4) + 'px';
   };
   let parsed;
+  const okLabel = isWeek ? 'Сохранить неделю' : 'Сохранить график';
   const update = () => {
     parsed = parseSchedule(ta.value);
-    const lessons = parsed.items.filter((i) => i.kind === 'lesson');
+    const lessons = parsed.items.filter((i) => i.kind === 'lesson' && !i.cancelled);
     const total = lessons.reduce((a, i) => a + i.price, 0);
     const newNames = [...new Set(lessons.map((i) => i.name).filter((n) => !known.has(n.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е'))))];
     const people = new Set(lessons.map((i) => i.name.trim().toLowerCase())).size;
@@ -1111,7 +1255,6 @@ async function pageTemplate() {
         .map((e) => `<div class="err-line"><code>${e.line}: ${esc(e.text.trim())}</code><span>${esc(e.message)}</span></div>`)
         .join('')}</div>`;
     }
-    // Одно имя с разными ценами — возможно, это разные ученики
     const prices = new Map();
     for (const l of lessons) {
       const k = l.name.trim().toLowerCase();
@@ -1125,19 +1268,18 @@ async function pageTemplate() {
         .join('')}</div>`;
     }
     if (lessons.length) {
-      h += `<div class="card mt"><b>${lessons.length} ${plural(lessons.length, 'урок', 'урока', 'уроков')} в неделю · ${people} ${plural(people, 'ученик', 'ученика', 'учеников')} · ${money(total)}</b>
+      h += `<div class="card mt"><b>${lessons.length} ${plural(lessons.length, 'урок', 'урока', 'уроков')} · ${people} ${plural(people, 'ученик', 'ученика', 'учеников')} · ${money(total)}</b>
         ${newNames.length ? `<div class="small mt">🆕 Будут добавлены ученики: ${newNames.map((n) => `<span class="badge accent">${esc(n)}</span>`).join(' ')}</div>` : ''}</div>`;
     }
     for (let d = 0; d < 7; d++) {
       const items = parsed.items.filter((i) => i.day === d);
       if (!items.length) continue;
       h += `<div class="section-title day"><span>${DAY_NAMES[d]}</span></div><div class="list">${items
-        .map(
-          (i) =>
-            i.kind === 'lesson'
-              ? `<div class="row sched"><div class="sched-time"><b>${i.start}</b><span>${i.end}</span></div>
-          <div class="row-main"><div class="row-title">${esc(i.name)}</div></div><div class="row-end">${money(i.price)}</div></div>`
-              : slotRow(i),
+        .map((i) =>
+          i.kind === 'lesson'
+            ? `<div class="row sched ${i.cancelled ? 'cancelled' : ''}"><div class="sched-time"><b>${i.start}</b><span>${i.end}</span></div>
+          <div class="row-main"><div class="row-title">${esc(i.name)}</div></div><div class="row-end">${i.cancelled ? 'отменён' : money(i.price)}</div></div>`
+            : slotRow(i),
         )
         .join('')}</div>`;
     }
@@ -1145,7 +1287,7 @@ async function pageTemplate() {
     $('#save').classList.toggle('danger', parsed.errors.length > 0);
     $('#save').textContent = parsed.errors.length
       ? `⚠️ Ошибка в ${plural(parsed.errors.length, 'строке', 'строках', 'строках')} ${parsed.errors.map((e) => e.line).join(', ')} — показать`
-      : 'Сохранить график';
+      : okLabel;
   };
   ta.addEventListener('input', () => {
     autosize();
@@ -1160,7 +1302,6 @@ async function pageTemplate() {
   });
   $('#save').onclick = async () => {
     if (parsed.errors.length) {
-      // Выделяем первую ошибочную строку прямо в тексте и показываем список ошибок
       const first = parsed.errors[0].line;
       const lines = ta.value.split('\n');
       const start = lines.slice(0, first - 1).join('\n').length + (first > 1 ? 1 : 0);
@@ -1171,10 +1312,18 @@ async function pageTemplate() {
     }
     $('#save').disabled = true;
     try {
-      const apply = $('#apply .on')?.dataset.v ?? 'this';
-      const r = await api('/template', { method: 'PUT', body: { text: ta.value, apply } });
-      toast(r.created.length ? `Сохранено. Добавлено учеников: ${r.created.length}` : 'График сохранён ✓');
-      location.hash = '#/schedule';
+      if (isWeek) {
+        const r = await api('/week', { method: 'PUT', body: { week, text: ta.value } });
+        toast(r.created.length ? `Неделя сохранена. Новые ученики: ${r.created.length}` : 'Неделя сохранена ✓');
+        location.hash = `#/schedule/${week}`;
+      } else {
+        const apply = $('#apply .on')?.dataset.v ?? 'this';
+        const r = await api('/template', { method: 'PUT', body: { text: ta.value, apply } });
+        let msg = r.created.length ? `Сохранено. Новых учеников: ${r.created.length}` : 'График сохранён ✓';
+        if (r.kept?.length) msg += `. Недели, изменённые вручную, не тронуты (${r.kept.length})`;
+        toast(msg);
+        location.hash = '#/schedule';
+      }
     } catch (err) {
       if (!(err instanceof AuthError)) toast(err.message);
       $('#save').disabled = false;

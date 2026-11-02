@@ -86,7 +86,15 @@ CREATE TABLE IF NOT EXISTS classes (
   created_at INTEGER NOT NULL
 );
 
--- Недели, для которых уроки уже созданы из графика
+-- График конкретной недели (копия постоянного, которую можно менять только для этой недели)
+CREATE TABLE IF NOT EXISTS week_texts (
+  week TEXT PRIMARY KEY,                       -- понедельник недели, YYYY-MM-DD
+  text TEXT NOT NULL,
+  edited INTEGER NOT NULL DEFAULT 0,           -- 1 = неделю меняли вручную
+  updated_at INTEGER NOT NULL
+);
+
+-- (устарело) Недели, для которых уроки уже созданы из графика
 CREATE TABLE IF NOT EXISTS class_weeks (
   week TEXT PRIMARY KEY
 );

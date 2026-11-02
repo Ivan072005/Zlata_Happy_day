@@ -381,3 +381,9 @@ textarea.tpl {
 .stats.three .stat { min-width: 0; overflow: hidden; }
 
 .warn-card { margin-top: 12px; border-color: var(--amber); background: var(--amber-soft); font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+@media (max-width: 380px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
+.week-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between; margin: 12px 4px 0; }
+.week-actions .small { flex: 1 1 200px; }
+.info-card { background: var(--accent-soft); border-color: transparent; font-size: 14px; }
+.row.slot.free[data-line]:active { background: var(--accent-soft); }

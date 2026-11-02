@@ -1,9 +1,9 @@
 import { checkPassword, clearSessionCookie, isAuthed, makeSessionCookie } from './auth';
 import * as db from './db';
 import { lessonStatus, notifyLessonOpen, wordsUsed } from './lessons';
-import { allocate, balance, ensureWeek, getTemplate, parse, saveTemplate, type ClassRow } from './schedule';
+import { allocate, balance, ensureWeek, getTemplate, getWeek, norm, parse, resetWeek, saveTemplate, saveWeek, type ClassRow } from './schedule';
 import { tg } from './telegram';
-import { addWeeks, endOfKyivDay, isWeekKey, weekKeyOf, weekRange } from './time';
+import { addWeeks, endOfKyivDay, isWeekKey, slotMs, weekKeyOf, weekRange } from './time';
 import { LEVELS, type Env, type Lesson, type Student } from './types';
 
 class HttpError extends Error {
@@ -466,60 +466,55 @@ route('GET', '/week', async (env, req) => {
   const url = new URL(req.url);
   const week = url.searchParams.get('week') || weekKeyOf(Date.now());
   if (!isWeekKey(week)) throw new HttpError(400, 'Неверная неделя');
-  await ensureWeek(env, week);
+  const wt = await getWeek(env, week);
   const [, end] = weekRange(week);
   const { results } = await env.DB.prepare(
-    `SELECT c.*, s.name AS student_name, s.archived FROM classes c JOIN students s ON s.id = c.student_id WHERE c.week = ? ORDER BY c.starts_at`,
+    `SELECT c.*, s.name AS student_name FROM classes c JOIN students s ON s.id = c.student_id WHERE c.week = ? ORDER BY c.starts_at`,
   )
     .bind(week)
     .all<ClassRow & { student_name: string }>();
   const alloc = await allocate(env, [...new Set(results.map((c) => c.student_id))], end);
-  const tpl = await getTemplate(env);
-  const slots = tpl ? parse(tpl.text).items.filter((i) => i.kind !== 'lesson') : [];
-  const classes = results.map((c) => ({ ...c, pay: c.status === 'planned' ? alloc.get(c.id) ?? null : null }));
-  const planned = classes.filter((c) => c.status === 'planned');
+
+  // Строки текста недели + оплата для уроков (сопоставляем по имени и времени)
+  const byKey = new Map(results.map((c) => [`${norm(c.student_name)}|${c.starts_at}`, c]));
+  const items = wt
+    ? parse(wt.text).items.map((it) => {
+        if (it.kind !== 'lesson' || !it.name) return it;
+        const c = byKey.get(`${norm(it.name)}|${slotMs(week, it.day, it.start)}`);
+        return { ...it, class_id: c?.id ?? null, student_id: c?.student_id ?? null, pay: c && c.status === 'planned' ? alloc.get(c.id) ?? null : null };
+      })
+    : [];
+  const planned = results.filter((c) => c.status === 'planned');
   return json({
     week,
     prev: addWeeks(week, -1),
     next: addWeeks(week, 1),
     current: weekKeyOf(Date.now()),
-    has_template: !!tpl,
-    classes,
-    slots,
+    has_template: !!(await getTemplate(env)),
+    text: wt?.text ?? '',
+    edited: !!wt?.edited,
+    updated_at: wt?.updated_at ?? null,
+    items,
     totals: {
       lessons: planned.length,
       expected: planned.reduce((a, c) => a + c.price, 0),
-      covered: planned.reduce((a, c) => a + (c.pay?.covered ?? 0), 0),
-      cancelled: classes.length - planned.length,
+      covered: planned.reduce((a, c) => a + (alloc.get(c.id)?.covered ?? 0), 0),
+      cancelled: results.length - planned.length,
     },
   });
 });
 
-route('POST', '/classes', async (env, _req, _p, body) => {
-  const student = await db.getStudent(env, int(body.student_id, 1, 1e9));
-  if (!student) throw new HttpError(404, 'Ученик не найден');
-  const starts = int(body.starts_at, 0, 1e14);
-  const ends = body.ends_at ? int(body.ends_at, starts + 1, 1e14) : starts + 3600 * 1000;
-  const res = await env.DB.prepare(
-    'INSERT INTO classes (student_id, week, starts_at, ends_at, price, manual, note, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
-  )
-    .bind(student.id, weekKeyOf(starts), starts, ends, int(body.price, 0, 1e6), str(body.note, 200), Date.now())
-    .run();
-  return json({ id: Number(res.meta.last_row_id) });
+route('PUT', '/week', async (env, _req, _p, body) => {
+  if (!isWeekKey(body.week)) throw new HttpError(400, 'Неверная неделя');
+  const text = str(body.text, 20000) ?? '';
+  const { errors } = parse(text);
+  if (errors.length) return json({ error: `Есть ошибки в строках: ${errors.map((e) => e.line).join(', ')}`, errors }, { status: 400 });
+  return json(await saveWeek(env, body.week, text));
 });
 
-route('PATCH', '/classes/:id', async (env, _req, [id], body) => {
-  const c = await env.DB.prepare('SELECT * FROM classes WHERE id = ?').bind(Number(id)).first<ClassRow>();
-  if (!c) throw new HttpError(404, 'Урок не найден');
-  const status = 'status' in body ? (body.status === 'cancelled' ? 'cancelled' : 'planned') : c.status;
-  const price = 'price' in body ? int(body.price, 0, 1e6) : c.price;
-  const note = 'note' in body ? str(body.note, 200) : c.note;
-  await env.DB.prepare('UPDATE classes SET status = ?, price = ?, note = ?, edited = 1 WHERE id = ?').bind(status, price, note, c.id).run();
-  return json({ ok: true });
-});
-
-route('DELETE', '/classes/:id', async (env, _req, [id]) => {
-  await env.DB.prepare('DELETE FROM classes WHERE id = ?').bind(Number(id)).run();
+route('POST', '/week/reset', async (env, _req, _p, body) => {
+  if (!isWeekKey(body.week)) throw new HttpError(400, 'Неверная неделя');
+  await resetWeek(env, body.week);
   return json({ ok: true });
 });
 
