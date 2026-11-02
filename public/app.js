@@ -1257,11 +1257,6 @@ async function pageTextEditor(mode, week = null) {
   const known = new Set(students.filter((s) => !s.archived).map((s) => s.name.trim().toLowerCase().replace(/\s+/g, ' ').replace(/ё/g, 'е')));
 
   $('#view').innerHTML = `
-    ${
-      isWeek
-        ? `<div class="card info-card">Это график <b>только этой недели</b>. Отмены, переносы, замены — пиши сюда. Следующие недели начнутся с постоянного графика.</div>`
-        : `<div class="card info-card">Это <b>постоянный график</b> — каждая новая неделя начинается с него. Разовые изменения (отмены, замены) делай в расписании конкретной недели.</div>`
-    }
     <div class="editor-bar">
       <button class="btn secondary" id="toggle-edit">✏️ Редактировать текстом</button>
       <a class="btn ghost" href="${isWeek ? `#/schedule/${week}` : '#/schedule'}">📅 Недельный график</a>
@@ -1308,18 +1303,6 @@ async function pageTextEditor(mode, week = null) {
     if (parsed.errors.length) {
       h += `<div class="card error-card"><b>⚠️ Не понял ${parsed.errors.length} ${plural(parsed.errors.length, 'строку', 'строки', 'строк')}:</b>${parsed.errors
         .map((e) => `<div class="err-line"><code>${e.line}: ${esc(e.text.trim())}</code><span>${esc(e.message)}</span></div>`)
-        .join('')}</div>`;
-    }
-    const prices = new Map();
-    for (const l of lessons) {
-      const k = l.name.trim().toLowerCase();
-      if (!prices.has(k)) prices.set(k, { name: l.name, set: new Set() });
-      prices.get(k).set.add(l.price);
-    }
-    const mixed = [...prices.values()].filter((p) => p.set.size > 1);
-    if (mixed.length) {
-      h += `<div class="card warn-card">${mixed
-        .map((p) => `<div>💡 <b>${esc(p.name)}</b> встречается с разной ценой (${[...p.set].join(' и ')} ₴). Если это <b>разные ученики</b> — допиши букву, например «${esc(p.name)} К.». Если один — всё в порядке.</div>`)
         .join('')}</div>`;
     }
     if (lessons.length) {
