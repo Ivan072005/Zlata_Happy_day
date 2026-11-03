@@ -23,6 +23,7 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
   share: '<path d="M12 3v13M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>',
   chevronL: '<path d="M15 18l-6-6 6-6"/>',
+  wallet: '<path d="M4 7a2 2 0 0 1 2-2h12v4"/><path d="M4 7v11a2 2 0 0 0 2 2h14V9H6a2 2 0 0 1-2-2Z"/><circle cx="16" cy="14.5" r="1.3"/>',
   chevronR: '<path d="M9 6l6 6-6 6"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
@@ -211,7 +212,8 @@ const routes = [
   [/^#\/students$/, pageStudents, 'students'],
   [/^#\/students\/(\d+)$/, pageStudent, 'students'],
   [/^#\/sessions\/(\d+)$/, pageSession, 'students'],
-  [/^#\/topics$/, pageTopics, 'topics'],
+  [/^#\/topics$/, pageTopics, 'settings'],
+  [/^#\/payments$/, pagePayments, 'payments'],
   [/^#\/settings$/, pageSettings, 'settings'],
 ];
 
@@ -316,7 +318,7 @@ async function pageHome() {
   }
   if (d.debts.length) {
     const total = d.debts.reduce((a, x) => a - x.balance, 0);
-    html += `<div class="section-title">Долги · ${money(total)}</div><div class="list">${d.debts
+    html += `<div class="section-title">Долги · ${money(total)} <a class="link-btn" href="#/payments">Все оплаты →</a></div><div class="list">${d.debts
       .map(
         (x) => `<a class="row" href="#/students/${x.id}"><div class="avatar">${esc(initials(x.name))}</div>
         <div class="row-main"><div class="row-title">${esc(x.name)}</div></div>
@@ -855,7 +857,7 @@ function financeBlock(f) {
 /** Окно «Внести оплату». */
 async function openPaymentSheet(student, finance = null, defaults = {}) {
   if (!finance) finance = (await api(`/students/${student.id}`)).finance;
-  const lastPrice = finance.classes.find((c) => c.status === 'planned')?.price ?? 0;
+  const lastPrice = defaults.price || (finance.classes.find((c) => c.status === 'planned')?.price ?? 0);
   const debt = finance.balance < 0 ? -finance.balance : 0;
   const chips = [];
   if (debt) chips.push([debt, `Весь долг · ${money(debt)}`]);
@@ -864,13 +866,23 @@ async function openPaymentSheet(student, finance = null, defaults = {}) {
     `Оплата · ${student.name}`,
     `<form id="f-pay">
       ${chips.length ? `<div class="chips" id="pay-chips">${chips.map(([v, l]) => `<button type="button" class="chip" data-v="${v}">${l}</button>`).join('')}</div>` : ''}
-      <label class="field"><span>Сумма, ₴</span><input class="input" type="number" name="amount" min="1" step="1" required inputmode="numeric" value="${defaults.amount ?? ''}" placeholder="350"></label>
+      ${lastPrice ? `<div class="grid-2">
+        <label class="field"><span>Сколько уроков</span><input class="input" type="number" name="count" min="1" max="100" inputmode="numeric" placeholder="8"><small>по ${money(lastPrice)}</small></label>
+        <label class="field"><span>Сумма, ₴</span><input class="input" type="number" name="amount" min="1" step="1" required inputmode="numeric" value="${defaults.amount ?? ''}" placeholder="${lastPrice}"></label>
+      </div>` : `<label class="field"><span>Сумма, ₴</span><input class="input" type="number" name="amount" min="1" step="1" required inputmode="numeric" value="${defaults.amount ?? ''}" placeholder="350"></label>`}
       <label class="field"><span>Дата</span><input class="input" type="date" name="date" value="${toLocalInput(Date.now()).slice(0, 10)}" required></label>
       <label class="field"><span>Комментарий (необязательно)</span><input class="input" name="note" maxlength="200" placeholder="Например: пакет 8 уроков, наличными"></label>
       <p class="small muted" style="margin-top:0">Можно внести любую сумму: за урок, пакетом или частично. Деньги сами распределятся по урокам по порядку.</p>
       <button class="btn block big" type="submit">Внести оплату</button>
     </form>`,
   );
+  $('[name=count]', el)?.addEventListener('input', (e) => {
+    const n = Number(e.target.value);
+    if (n > 0) {
+      $('[name=amount]', el).value = n * lastPrice;
+      if (!$('[name=note]', el).value || /^\d+ урок/.test($('[name=note]', el).value)) $('[name=note]', el).value = `${n} ${plural(n, 'урок', 'урока', 'уроков')}`;
+    }
+  });
   $('#pay-chips', el)?.addEventListener('click', (e) => {
     const b = e.target.closest('[data-v]');
     if (!b) return;
@@ -1507,6 +1519,127 @@ async function pageTextEditor(mode, week = null) {
   };
 }
 
+// ───────── Оплаты (как в заметках) ─────────
+const shortDate = (ts) => new Date(ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+const lessonsWord = (n) => `${n} ${plural(n, 'урок', 'урока', 'уроков')}`;
+
+function payCard(s, { expanded = false } = {}) {
+  // Сводка: долг / наперёд / всё оплачено
+  const badges = [];
+  if (s.unpaid.length) badges.push(`<span class="badge red">не оплачено ${lessonsWord(s.unpaid.length)} · ${money(s.debt)}</span>`);
+  if (s.prepaid_lessons) badges.push(`<span class="badge green">наперёд ${lessonsWord(s.prepaid_lessons)}</span>`);
+  else if (s.leftover > 0) badges.push(`<span class="badge green">наперёд ${money(s.leftover)}</span>`);
+  if (!badges.length) badges.push('<span class="badge">всё оплачено</span>');
+
+  // Показываем последние оплаты (как в заметках), старые — по кнопке
+  const pk = s.packages;
+  const shown = expanded ? pk : pk.slice(-2);
+  const hidden = pk.length - shown.length;
+
+  const pkHtml = shown
+    .map((p, idx) => {
+      const isLast = p === pk[pk.length - 1];
+      const items = p.lessons.map(
+        (l, i) =>
+          `<div class="pl ${l.covered < l.price ? 'part' : 'done'}"><span class="pl-mark">${l.covered < l.price ? '◐' : '✓'}</span>
+          <span class="pl-n">${i + 1}</span><span class="pl-d">${shortDate(l.date)}</span>${l.covered < l.price ? `<span class="pl-x">${l.covered}/${l.price}</span>` : ''}</div>`,
+      );
+      // Оплачено наперёд — пустые кружки у последней оплаты (с датой будущего урока, если он уже в расписании)
+      if (isLast) {
+        s.ahead.forEach((a, i) =>
+          items.push(`<div class="pl empty"><span class="pl-mark">○</span><span class="pl-n">${p.lessons.length + i + 1}</span><span class="pl-d">${a.date ? shortDate(a.date) : ''}</span></div>`),
+        );
+      }
+      const rest = isLast ? s.ahead_rest : 0;
+      return `<div class="pk">
+        <div class="pk-head"><b>Оплата ${shortDate(p.paid_at)} · ${money(p.amount)}</b>${p.note ? `<span class="muted"> · ${esc(p.note)}</span>` : ''}</div>
+        <div class="pl-grid">${items.join('') || '<span class="small muted">уроков ещё не было</span>'}</div>
+        ${rest > 0 ? `<div class="small muted">+ ${money(rest)} в счёт следующего урока</div>` : ''}
+      </div>`;
+    })
+    .join('');
+
+  const unpaidHtml = s.unpaid.length
+    ? `<div class="pk unpaid"><div class="pk-head"><b>Не оплачено</b></div><div class="pl-grid">${s.unpaid
+        .map(
+          (u, i) =>
+            `<div class="pl due"><span class="pl-mark">✗</span><span class="pl-n">${i + 1}</span><span class="pl-d">${shortDate(u.date)}</span>${u.owed < u.price ? `<span class="pl-x">−${u.owed}</span>` : ''}</div>`,
+        )
+        .join('')}</div></div>`
+    : '';
+
+  return `<div class="card pay-card" data-sid="${s.id}" data-name="${esc(s.name.toLowerCase())}">
+    <div class="pay-head">
+      <a href="#/students/${s.id}" class="pay-name">${esc(s.name)}</a>
+      <button class="btn" style="min-height:36px;padding:6px 12px" data-pay="${s.id}">+ Оплата</button>
+    </div>
+    <div class="pay-badges">${badges.join('')}${s.price ? `<span class="small muted">урок ${money(s.price)}</span>` : ''}</div>
+    ${hidden > 0 ? `<button class="link-btn" data-more="${s.id}">Показать ещё ${hidden} ${plural(hidden, 'оплату', 'оплаты', 'оплат')}</button>` : ''}
+    ${pkHtml}
+    ${unpaidHtml}
+    ${!pk.length && !s.unpaid.length ? '<p class="small muted">Пока нет ни уроков, ни оплат.</p>' : ''}
+  </div>`;
+}
+
+async function pagePayments() {
+  setHeader({ title: 'Оплаты' });
+  const { students } = await api('/payments-board');
+  const totalDebt = students.reduce((a, s) => a + s.debt, 0);
+  const debtors = students.filter((s) => s.unpaid.length).length;
+  const prepaid = students.filter((s) => s.leftover > 0).length;
+  let filter = 'all';
+  const expanded = new Set();
+
+  const draw = () => {
+    const q = ($('#q')?.value ?? '').trim().toLowerCase();
+    const list = students
+      .filter((s) => (filter === 'debt' ? s.unpaid.length : filter === 'prepaid' ? s.leftover > 0 : true))
+      .filter((s) => !q || s.name.toLowerCase().includes(q))
+      // Сначала должники, потом остальные
+      .sort((a, b) => b.debt - a.debt || a.name.localeCompare(b.name, 'ru'));
+    $('#pay-list').innerHTML = list.length
+      ? list.map((s) => payCard(s, { expanded: expanded.has(s.id) })).join('')
+      : '<div class="card empty">Никого не найдено</div>';
+  };
+
+  $('#view').innerHTML = `
+    <div class="stats three">
+      <div class="stat"><div class="stat-value red-text">${money(totalDebt)}</div><div class="stat-label">долг всего</div></div>
+      <div class="stat"><div class="stat-value">${debtors}</div><div class="stat-label">должны</div></div>
+      <div class="stat"><div class="stat-value">${prepaid}</div><div class="stat-label">оплатили наперёд</div></div>
+    </div>
+    <div class="chips mt" id="pay-filter">
+      <button class="chip on" data-f="all">Все</button>
+      <button class="chip" data-f="debt">Есть долг</button>
+      <button class="chip" data-f="prepaid">Наперёд</button>
+    </div>
+    <label class="search">${icon('search')}<input class="input" type="search" placeholder="Поиск по имени" id="q" autocomplete="off"></label>
+    <div id="pay-list" class="row-gap"></div>
+    <p class="small muted" style="text-align:center">✓ — урок оплачен · ◐ — оплачен частично · ○ — оплачено наперёд · ✗ — не оплачен</p>`;
+  draw();
+
+  $('#q').oninput = draw;
+  $('#pay-filter').onclick = (e) => {
+    const b = e.target.closest('[data-f]');
+    if (!b) return;
+    filter = b.dataset.f;
+    $$('#pay-filter .chip').forEach((c) => c.classList.toggle('on', c === b));
+    draw();
+  };
+  $('#view').onclick = async (e) => {
+    const more = e.target.closest('[data-more]');
+    if (more) {
+      expanded.add(Number(more.dataset.more));
+      return draw();
+    }
+    const pay = e.target.closest('[data-pay]');
+    if (pay) {
+      const s = students.find((x) => x.id === Number(pay.dataset.pay));
+      openPaymentSheet({ id: s.id, name: s.name }, null, { price: s.price });
+    }
+  };
+}
+
 // ───────── Разговор ─────────
 async function pageSession(id) {
   const { session: s, messages } = await api(`/sessions/${id}`);
@@ -1605,6 +1738,11 @@ async function pageSettings() {
       }
       ${s.bot_username ? `<p class="small muted" style="margin:12px 0 0">Бот: <a href="https://t.me/${esc(s.bot_username)}" target="_blank" rel="noopener">@${esc(s.bot_username)}</a></p>` : ''}
     </div>
+
+    <div class="section-title">Практика с ботом</div>
+    <a class="card row" href="#/topics" style="min-height:0">
+      <div class="row-main"><div class="row-title">📚 Темы для практики</div><div class="row-sub">Сценарии и слова для разговоров с ботом</div></div>
+      <div class="row-end">${icon('chevronR')}</div></a>
 
     <div class="section-title">Уведомления</div>
     <div class="card" style="padding-top:4px;padding-bottom:4px">

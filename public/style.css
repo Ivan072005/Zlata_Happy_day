@@ -408,3 +408,27 @@ textarea.tpl {
 .row.sched.pending .row-title { color: var(--amber); }
 .from-mark { color: var(--blue); font-weight: 600; }
 .free-mark { color: var(--green); }
+
+/* ───────── Оплаты как в заметках ───────── */
+.pay-card { padding: 14px; }
+.pay-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pay-name { font-size: 17px; font-weight: 700; color: var(--text); }
+.pay-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 8px 0 4px; }
+.pk { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.pk-head { font-size: 14px; margin-bottom: 8px; }
+.pl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; }
+.pl {
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 10px;
+  border: 1px solid var(--line); font-variant-numeric: tabular-nums; font-size: 14px; min-height: 36px;
+}
+.pl-mark { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 800; flex: none; }
+.pl-n { color: var(--muted); min-width: 16px; }
+.pl-d { font-weight: 600; }
+.pl-x { margin-left: auto; font-size: 12px; color: var(--amber); }
+.pl.done .pl-mark { background: #e8b400; color: #fff; }
+.pl.part .pl-mark { background: var(--amber-soft); color: var(--amber); border: 1.5px solid var(--amber); }
+.pl.empty { border-style: dashed; }
+.pl.empty .pl-mark { border: 1.5px solid var(--line-strong); color: transparent; }
+.pl.due { border-color: var(--red); background: var(--red-soft); }
+.pl.due .pl-mark { background: var(--red); color: #fff; }
+.pk.unpaid .pk-head b { color: var(--red); }

@@ -520,6 +520,88 @@ route('POST', '/week/reset', async (env, _req, _p, body) => {
 
 // ───────── Оплаты ─────────
 
+/**
+ * Доска оплат «как в заметках»: по каждому ученику — его оплаты (пакеты) и какие проведённые уроки
+ * каждая оплата покрыла (по порядку дат), неоплаченные уроки и сколько уроков оплачено наперёд.
+ */
+route('GET', '/payments-board', async (env) => {
+  const t = Date.now();
+  // Будущие уроки на месяц вперёд — чтобы показать, на какие из них хватит предоплаты
+  for (let i = 0; i <= 4; i++) await ensureWeek(env, addWeeks(weekKeyOf(t), i));
+  const [studs, pays, classes, prices, future] = await Promise.all([
+    env.DB.prepare('SELECT id, name FROM students WHERE archived = 0 ORDER BY name COLLATE NOCASE').all<{ id: number; name: string }>(),
+    env.DB.prepare('SELECT id, student_id, amount, note, paid_at FROM payments ORDER BY paid_at, id').all<{
+      id: number; student_id: number; amount: number; note: string | null; paid_at: number;
+    }>(),
+    env.DB.prepare("SELECT id, student_id, starts_at, price FROM classes WHERE status = 'planned' AND starts_at <= ? ORDER BY starts_at, id")
+      .bind(t)
+      .all<{ id: number; student_id: number; starts_at: number; price: number }>(),
+    // Обычная цена ученика: ближайший будущий урок, иначе последний прошедший
+    env.DB.prepare(
+      `SELECT student_id, price FROM classes c WHERE status = 'planned' AND id = (
+         SELECT id FROM classes c2 WHERE c2.student_id = c.student_id AND c2.status = 'planned'
+         ORDER BY (c2.starts_at < ?1), ABS(c2.starts_at - ?1) LIMIT 1)`,
+    )
+      .bind(t)
+      .all<{ student_id: number; price: number }>(),
+    env.DB.prepare("SELECT student_id, starts_at, price FROM classes WHERE status = 'planned' AND starts_at > ? ORDER BY starts_at, id")
+      .bind(t)
+      .all<{ student_id: number; starts_at: number; price: number }>(),
+  ]);
+  const priceOf = new Map(prices.results.map((r) => [r.student_id, r.price]));
+  const out = [];
+  for (const st of studs.results) {
+    const myPays = pays.results.filter((p) => p.student_id === st.id);
+    const myClasses = classes.results.filter((c) => c.student_id === st.id);
+    if (!myPays.length && !myClasses.length) continue;
+    const packages = myPays.map((p) => ({ ...p, left: p.amount, lessons: [] as { date: number; price: number; covered: number }[] }));
+    const unpaid: { date: number; price: number; owed: number }[] = [];
+    let pi = 0;
+    for (const c of myClasses) {
+      let need = c.price;
+      while (need > 0 && pi < packages.length) {
+        const pk = packages[pi];
+        const take = Math.min(pk.left, need);
+        if (take > 0) {
+          pk.lessons.push({ date: c.starts_at, price: c.price, covered: take });
+          pk.left -= take;
+          need -= take;
+        }
+        if (pk.left === 0) pi++;
+      }
+      if (need > 0) unpaid.push({ date: c.starts_at, price: c.price, owed: need });
+    }
+    const leftover = packages.reduce((a, p) => a + p.left, 0);
+    const price = priceOf.get(st.id) ?? myClasses[myClasses.length - 1]?.price ?? 0;
+    // Предоплата по будущим урокам из расписания (с их реальными ценами), остаток — по обычной цене
+    const ahead: { date: number | null; price: number }[] = [];
+    let rest = leftover;
+    for (const f of future.results) {
+      if (f.student_id !== st.id || f.price <= 0) continue;
+      if (rest < f.price) break; // уроки оплачиваются по порядку
+      ahead.push({ date: f.starts_at, price: f.price });
+      rest -= f.price;
+    }
+    while (price > 0 && rest >= price && ahead.length < 60) {
+      ahead.push({ date: null, price });
+      rest -= price;
+    }
+    out.push({
+      id: st.id,
+      name: st.name,
+      price,
+      packages: packages.map(({ left, ...p }) => ({ ...p, left })),
+      unpaid,
+      debt: unpaid.reduce((a, u) => a + u.owed, 0),
+      leftover,
+      ahead,
+      ahead_rest: rest,
+      prepaid_lessons: ahead.length,
+    });
+  }
+  return json({ students: out });
+});
+
 route('POST', '/payments', async (env, _req, _p, body) => {
   const student = await db.getStudent(env, int(body.student_id, 1, 1e9));
   if (!student) throw new HttpError(404, 'Ученик не найден');
