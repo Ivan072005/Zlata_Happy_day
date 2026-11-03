@@ -599,7 +599,7 @@ async function pageStudent(id) {
       else if (a === 'add-lesson') openLessonForm(s);
       else if (a === 'add-payment') openPaymentSheet(s, data.finance);
       else if (a === 'del-payment') {
-        if (!confirm('Удалить эту оплату?')) return;
+        if (!confirm('Убрать эту оплату? Уроки, которые она покрывала, станут неоплаченными.')) return;
         await api(`/payments/${e.target.closest('[data-id]').dataset.id}`, { method: 'DELETE' });
         toast('Оплата удалена');
         render();
@@ -847,7 +847,7 @@ function financeBlock(f) {
             .map(
               (p) => `<div class="row" data-id="${p.id}"><div class="row-main"><div class="row-title green-text">+${money(p.amount)}</div>
             <div class="row-sub">${new Date(p.paid_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}${p.note ? ` · ${esc(p.note)}` : ''}</div></div>
-            <div class="row-end"><button class="link-btn" data-action="del-payment" aria-label="Удалить оплату">✕</button></div></div>`,
+            <div class="row-end"><button class="pk-del" data-action="del-payment" aria-label="Убрать оплату">✕ Убрать</button></div></div>`,
             )
             .join('')}</div>`
         : ''
@@ -1533,6 +1533,22 @@ function payCard(s, { expanded = false } = {}) {
 
   // Показываем последние оплаты (как в заметках), старые — по кнопке
   const pk = s.packages;
+  // Раздать уроки «наперёд» по оплатам: каждая оплата держит столько кружков, на сколько хватает её остатка
+  const aheadOf = new Map(pk.map((p) => [p.id, []]));
+  const left = pk.map((p) => p.left);
+  let pi = 0;
+  for (const a of s.ahead) {
+    while (pi < pk.length && left[pi] <= 0) pi++;
+    if (pi >= pk.length) break;
+    aheadOf.get(pk[pi].id).push(a);
+    let need = a.price;
+    for (let j = pi; j < pk.length && need > 0; j++) {
+      const take = Math.min(left[j], need);
+      left[j] -= take;
+      need -= take;
+    }
+  }
+  const restOf = new Map(pk.map((p, i) => [p.id, Math.max(0, left[i])]));
   const shown = expanded ? pk : pk.slice(-2);
   const hidden = pk.length - shown.length;
 
@@ -1544,15 +1560,14 @@ function payCard(s, { expanded = false } = {}) {
           `<div class="pl ${l.covered < l.price ? 'part' : 'done'}"><span class="pl-mark">${l.covered < l.price ? '◐' : '✓'}</span>
           <span class="pl-n">${i + 1}</span><span class="pl-d">${shortDate(l.date)}</span>${l.covered < l.price ? `<span class="pl-x">${l.covered}/${l.price}</span>` : ''}</div>`,
       );
-      // Оплачено наперёд — пустые кружки у последней оплаты (с датой будущего урока, если он уже в расписании)
-      if (isLast) {
-        s.ahead.forEach((a, i) =>
-          items.push(`<div class="pl empty"><span class="pl-mark">○</span><span class="pl-n">${p.lessons.length + i + 1}</span><span class="pl-d">${a.date ? shortDate(a.date) : ''}</span></div>`),
-        );
-      }
+      // Оплачено наперёд — пустые кружки этой оплаты (с датой будущего урока, если он уже в расписании)
+      aheadOf.get(p.id).forEach((a, i) =>
+        items.push(`<div class="pl empty"><span class="pl-mark">○</span><span class="pl-n">${p.lessons.length + i + 1}</span><span class="pl-d">${a.date ? shortDate(a.date) : ''}</span></div>`),
+      );
       const rest = isLast ? s.ahead_rest : 0;
       return `<div class="pk">
-        <div class="pk-head"><b>Оплата ${shortDate(p.paid_at)} · ${money(p.amount)}</b>${p.note ? `<span class="muted"> · ${esc(p.note)}</span>` : ''}</div>
+        <div class="pk-head"><span><b>Оплата ${shortDate(p.paid_at)} · ${money(p.amount)}</b>${p.note ? `<span class="muted"> · ${esc(p.note)}</span>` : ''}</span>
+          <button class="pk-del" data-del-pay="${p.id}" data-label="${esc(`${s.name}: ${money(p.amount)} от ${shortDate(p.paid_at)}`)}" aria-label="Убрать оплату">✕ Убрать</button></div>
         <div class="pl-grid">${items.join('') || '<span class="small muted">уроков ещё не было</span>'}</div>
         ${rest > 0 ? `<div class="small muted">+ ${money(rest)} в счёт следующего урока</div>` : ''}
       </div>`;
@@ -1631,6 +1646,18 @@ async function pagePayments() {
     if (more) {
       expanded.add(Number(more.dataset.more));
       return draw();
+    }
+    const del = e.target.closest('[data-del-pay]');
+    if (del) {
+      if (!confirm(`Убрать оплату ${del.dataset.label}? Уроки, которые она покрывала, станут неоплаченными.`)) return;
+      try {
+        await api(`/payments/${del.dataset.delPay}`, { method: 'DELETE' });
+        toast('Оплата убрана');
+        render();
+      } catch (err) {
+        if (!(err instanceof AuthError)) toast(err.message);
+      }
+      return;
     }
     const pay = e.target.closest('[data-pay]');
     if (pay) {

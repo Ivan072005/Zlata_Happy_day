@@ -432,3 +432,7 @@ textarea.tpl {
 .pl.due { border-color: var(--red); background: var(--red-soft); }
 .pl.due .pl-mark { background: var(--red); color: #fff; }
 .pk.unpaid .pk-head b { color: var(--red); }
+
+.pk-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.pk-del { border: 1px solid var(--line); background: var(--surface); color: var(--red); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.pk-del:hover { background: var(--red-soft); }
