@@ -1942,6 +1942,39 @@ async function pageSettings() {
   });
 }
 
+// ───────── Цвета: у каждого ученика свой, у каждого дня недели свой ─────────
+const STUDENT_COLORS = ['#ef5b5b', '#f08c00', '#12b886', '#2c7be5', '#7c5cff', '#e64980', '#37b24d', '#fd7e14', '#15aabf', '#be4bdb', '#d9480f', '#4263eb'];
+const colorOf = (name) => STUDENT_COLORS[[...String(name).trim().toLowerCase()].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % STUDENT_COLORS.length];
+const DAY_WORDS = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'];
+
+function paint(root = document) {
+  root.querySelectorAll('.section-title.day:not([data-dow])').forEach((h) => {
+    const t = h.textContent.trim().toLowerCase();
+    const i = DAY_WORDS.findIndex((n) => t.startsWith(n));
+    if (i >= 0) h.dataset.dow = i;
+  });
+  root.querySelectorAll('.avatar:not([data-c])').forEach((a) => {
+    const name = a.closest('.row,.card')?.querySelector('.row-title,.pay-name,h2')?.textContent;
+    if (!name) return;
+    a.dataset.c = '1';
+    a.style.setProperty('--uc', colorOf(name));
+  });
+  root.querySelectorAll('.row.sched:not([data-c])').forEach((r) => {
+    if (r.classList.contains('slot')) return;
+    const n = r.querySelector('.row-title')?.textContent?.trim();
+    if (!n || /^(сегодня|завтра|вчера|пн|вт|ср|чт|пт|сб|вс)/i.test(n)) return;
+    r.dataset.c = '1';
+    r.style.setProperty('--uc', colorOf(n));
+  });
+  root.querySelectorAll('.pay-card:not([data-c])').forEach((c) => {
+    const n = c.querySelector('.pay-name')?.textContent;
+    if (!n) return;
+    c.dataset.c = '1';
+    c.style.setProperty('--uc', colorOf(n));
+  });
+}
+new MutationObserver(() => paint()).observe(document.body, { childList: true, subtree: true });
+
 // ───────── Старт ─────────
 $$('[data-icon]').forEach((el) => (el.outerHTML = icon(el.dataset.icon)));
 window.addEventListener('hashchange', render);

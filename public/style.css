@@ -1,24 +1,24 @@
 :root {
-  --bg: #f6f7fb;
+  --bg: #eefaf6;
   --surface: #ffffff;
-  --surface-2: #f0f2f7;
-  --text: #171a21;
-  --muted: #6b7180;
-  --border: #e3e6ee;
-  --accent: #3d5afe;
-  --accent-soft: #e8ecff;
+  --surface-2: #e3f5ef;
+  --text: #10302a;
+  --muted: #5b7a73;
+  --border: #cfe9e1;
+  --accent: #0fa89a;
+  --accent-soft: #d4f3ee;
   --on-accent: #ffffff;
-  --green: #1f9d55;
-  --green-soft: #e3f6ea;
-  --amber: #b7791f;
-  --amber-soft: #fdf3dc;
-  --red: #d64545;
-  --red-soft: #fde8e8;
-  --blue: #2f6fde;
-  --blue-soft: #e4eefd;
-  --gray-soft: #eef0f4;
-  --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 3px rgba(16, 24, 40, .06);
-  --shadow-lg: 0 12px 32px rgba(16, 24, 40, .18);
+  --green: #14a05a;
+  --green-soft: #dcf6e7;
+  --amber: #d98a00;
+  --amber-soft: #fff1d6;
+  --red: #e2504c;
+  --red-soft: #fde6e5;
+  --blue: #2c7be5;
+  --blue-soft: #e2eeff;
+  --gray-soft: #e6f2ee;
+  --shadow: 0 1px 2px rgba(16, 60, 50, .05), 0 1px 3px rgba(16, 60, 50, .07);
+  --shadow-lg: 0 12px 32px rgba(16, 60, 50, .18);
   --radius: 16px;
   --radius-sm: 10px;
   --tabbar-h: 64px;
@@ -29,34 +29,34 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #111318;
-    --surface: #1a1d24;
-    --surface-2: #232731;
-    --text: #eceef3;
-    --muted: #9aa1b1;
-    --border: #2c313c;
-    --accent: #6d84ff;
-    --accent-soft: #252d52;
-    --on-accent: #0d1020;
-    --green: #4cc38a;
-    --green-soft: #173527;
-    --amber: #e3b341;
-    --amber-soft: #3a2f14;
-    --red: #f07272;
-    --red-soft: #3d1d1f;
-    --blue: #7aa7ff;
-    --blue-soft: #1c2a47;
-    --gray-soft: #262a33;
+    --bg: #0c1a18;
+    --surface: #132624;
+    --surface-2: #1b3230;
+    --text: #e6f6f2;
+    --muted: #8fb3ab;
+    --border: #24403c;
+    --accent: #2dd4bf;
+    --accent-soft: #123d38;
+    --on-accent: #04201c;
+    --green: #4ade80;
+    --green-soft: #12351f;
+    --amber: #fbbf24;
+    --amber-soft: #3a2f12;
+    --red: #fb7185;
+    --red-soft: #3d1a22;
+    --blue: #60a5fa;
+    --blue-soft: #14294a;
+    --gray-soft: #1c2f2c;
     --shadow: none;
     --shadow-lg: 0 12px 32px rgba(0, 0, 0, .5);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #111318; --surface: #1a1d24; --surface-2: #232731; --text: #eceef3; --muted: #9aa1b1; --border: #2c313c;
-  --accent: #6d84ff; --accent-soft: #252d52; --on-accent: #0d1020; --green: #4cc38a; --green-soft: #173527;
-  --amber: #e3b341; --amber-soft: #3a2f14; --red: #f07272; --red-soft: #3d1d1f; --blue: #7aa7ff; --blue-soft: #1c2a47;
-  --gray-soft: #262a33; --shadow: none; --shadow-lg: 0 12px 32px rgba(0, 0, 0, .5); color-scheme: dark;
+  --bg: #0c1a18; --surface: #132624; --surface-2: #1b3230; --text: #e6f6f2; --muted: #8fb3ab; --border: #24403c;
+  --accent: #2dd4bf; --accent-soft: #123d38; --on-accent: #04201c; --green: #4ade80; --green-soft: #12351f;
+  --amber: #fbbf24; --amber-soft: #3a2f12; --red: #fb7185; --red-soft: #3d1a22; --blue: #60a5fa; --blue-soft: #14294a;
+  --gray-soft: #1c2f2c; --shadow: none; --shadow-lg: 0 12px 32px rgba(0, 0, 0, .5); color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -389,9 +389,9 @@ textarea.tpl {
 .row.slot.free[data-line]:active { background: var(--accent-soft); }
 
 /* ───────── Чёткие линии таблиц ───────── */
-:root { --line: #cfd4df; --line-strong: #b7bdcb; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --line: #3b4250; --line-strong: #4b5363; } }
-:root[data-theme="dark"] { --line: #3b4250; --line-strong: #4b5363; }
+:root { --line: #c3e2d8; --line-strong: #9fd0c1; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --line: #27443f; --line-strong: #35605a; } }
+:root[data-theme="dark"] { --line: #27443f; --line-strong: #35605a; }
 .list { border: 1px solid var(--line-strong); }
 .row { border-bottom: 1px solid var(--line); }
 .row.sched .sched-time { align-self: stretch; display: flex; flex-direction: column; justify-content: center; padding-right: 12px; border-right: 1px solid var(--line); width: 64px; }
@@ -444,3 +444,34 @@ button.pl { font: inherit; color: inherit; background: var(--surface); cursor: p
 .pl.empty:hover .pl-mark { border-color: var(--accent); }
 .chip.used { opacity: .55; }
 .amber-text { color: var(--amber); }
+
+/* ───────── Мятная тема: цвета дней, учеников, плиток ───────── */
+:root {
+  --d0: #0fa89a; --d1: #2c7be5; --d2: #8a5cf6; --d3: #e2504c; --d4: #f08c00; --d5: #d6336c; --d6: #2f9e44;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --d0: #2dd4bf; --d1: #60a5fa; --d2: #a78bfa; --d3: #fb7185; --d4: #fbbf24; --d5: #f472b6; --d6: #4ade80;
+} }
+.section-title.day { border-bottom-width: 3px; }
+.section-title.day > span:first-child { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; }
+.section-title.day > span:first-child::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: var(--dc, var(--line-strong)); flex: none; }
+.section-title.day[data-dow] { border-bottom-color: var(--dc); }
+.section-title.day[data-dow] > span:first-child { color: var(--dc); }
+.section-title.day[data-dow="0"] { --dc: var(--d0); }
+.section-title.day[data-dow="1"] { --dc: var(--d1); }
+.section-title.day[data-dow="2"] { --dc: var(--d2); }
+.section-title.day[data-dow="3"] { --dc: var(--d3); }
+.section-title.day[data-dow="4"] { --dc: var(--d4); }
+.section-title.day[data-dow="5"] { --dc: var(--d5); }
+.section-title.day[data-dow="6"] { --dc: var(--d6); }
+.avatar[data-c] { color: #fff; background: var(--uc); }
+.row.sched[data-c] { border-left: 4px solid var(--uc); }
+.stat { border-top: 4px solid var(--accent); }
+.stats .stat:nth-child(2) { border-top-color: var(--blue); }
+.stats .stat:nth-child(3) { border-top-color: var(--green); }
+.stats .stat:nth-child(4) { border-top-color: var(--amber); }
+.pay-card { border-left: 5px solid var(--uc, var(--accent)); }
+.pl.done .pl-mark { background: var(--accent); color: var(--on-accent); }
+.tabbar a.on svg { filter: drop-shadow(0 2px 6px color-mix(in srgb, var(--accent) 45%, transparent)); }
+.fab { box-shadow: 0 10px 28px color-mix(in srgb, var(--accent) 45%, transparent); }
+.btn:not(.secondary):not(.ghost):not(.danger) { box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 28%, transparent); }
