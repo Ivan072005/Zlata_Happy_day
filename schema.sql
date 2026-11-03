@@ -104,11 +104,23 @@ CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL,
   amount INTEGER NOT NULL,
-  lesson_price INTEGER,                        -- цена урока, если оплатили числом уроков
+  lessons INTEGER,                             -- сколько уроков оплачено (кружков)
+  lesson_price INTEGER,                        -- цена урока
   note TEXT,
   paid_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+-- Отметки уроков в оплатах (закрашенный кружок с датой). payment_id NULL = урок не оплачен (долг)
+CREATE TABLE IF NOT EXISTS lesson_marks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  student_id INTEGER NOT NULL,
+  payment_id INTEGER,
+  date TEXT NOT NULL,                          -- YYYY-MM-DD
+  price INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_marks_student ON lesson_marks(student_id, date);
 
 CREATE INDEX IF NOT EXISTS idx_classes_student ON classes(student_id, starts_at);
 CREATE INDEX IF NOT EXISTS idx_classes_week ON classes(week, starts_at);

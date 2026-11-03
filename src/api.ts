@@ -2,6 +2,7 @@ import { checkPassword, clearSessionCookie, isAuthed, makeSessionCookie } from '
 import * as db from './db';
 import { lessonStatus, notifyLessonOpen, wordsUsed } from './lessons';
 import { allocate, balance, ensureWeek, getTemplate, getWeek, norm, parse, resetWeek, saveTemplate, saveWeek, type ClassRow } from './schedule';
+import { absorbDebts, migrateMarks, paymentWithFreeSlot, studentPrice, summary, SUMMARY_SQL } from './marks';
 import { tg } from './telegram';
 import { addWeeks, endOfKyivDay, isWeekKey, slotMs, weekKeyOf, weekRange } from './time';
 import { LEVELS, type Env, type Lesson, type Student } from './types';
@@ -73,11 +74,7 @@ const route = (method: string, path: string, h: Handler) =>
 let migrated = false;
 async function migrate(env: Env) {
   if (migrated) return;
-  try {
-    await env.DB.prepare('ALTER TABLE payments ADD COLUMN lesson_price INTEGER').run();
-  } catch {
-    // колонка уже есть
-  }
+  await migrateMarks(env);
   migrated = true;
 }
 
@@ -159,10 +156,8 @@ route('GET', '/dashboard', async (env) => {
       .bind(t - 7 * DAY)
       .first(),
     env.DB.prepare(
-      `SELECT * FROM (SELECT s.id, s.name, ${BALANCE} AS balance FROM students s WHERE s.archived = 0) WHERE balance < 0 ORDER BY balance`,
-    )
-      .bind(t)
-      .all<{ id: number; name: string; balance: number }>(),
+      `SELECT * FROM (SELECT s.id, s.name, ${SUMMARY_SQL} FROM students s WHERE s.archived = 0) WHERE debt_count > 0 ORDER BY debt_sum DESC`,
+    ).all<{ id: number; name: string; debt_count: number; debt_sum: number }>(),
     env.DB.prepare(
       `SELECT c.*, s.name AS student_name FROM classes c JOIN students s ON s.id = c.student_id
        WHERE c.starts_at >= ?1 AND c.starts_at < ?2 ORDER BY c.starts_at`,
@@ -172,22 +167,19 @@ route('GET', '/dashboard', async (env) => {
     env.DB.prepare("SELECT student_id, price, id FROM classes WHERE week = ? AND status = 'planned'").bind(week).all<{ student_id: number; price: number; id: number }>(),
     env.DB.prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE paid_at >= ?').bind(t - 30 * DAY).first<{ total: number }>(),
   ]);
-  const weekAlloc = await allocate(env, [...new Set(weekClasses.results.map((c) => c.student_id))], we);
   const todayEnd = endOfKyivDay(t);
   const upcomingClasses = today.results.filter((c) => c.ends_at > t);
-  const todayAlloc = await allocate(env, [...new Set(upcomingClasses.map((c) => c.student_id))], we);
   return json({
     open: withStatus(open.results, t),
     upcoming: withStatus(upcoming.results, t),
     recent_lessons: withStatus(recentLessons.results, t),
     recent_feedback: recent.results,
     debts: debts.results,
-    classes_next: upcomingClasses.slice(0, 12).map((c) => ({ ...c, pay: todayAlloc.get(c.id) ?? null, today: c.starts_at < todayEnd })),
+    classes_next: upcomingClasses.slice(0, 12).map((c) => ({ ...c, today: c.starts_at < todayEnd })),
     week: {
       key: week,
       lessons: weekClasses.results.length,
       expected: weekClasses.results.reduce((a, c) => a + c.price, 0),
-      covered: weekClasses.results.reduce((a, c) => a + (weekAlloc.get(c.id)?.covered ?? 0), 0),
     },
     paid_30d: monthPaid?.total ?? 0,
     counts,
@@ -205,7 +197,7 @@ route('GET', '/students', async (env) => {
        (SELECT ROUND(AVG(score), 1) FROM sessions x WHERE x.student_id = s.id AND x.score IS NOT NULL) AS avg_score,
        (SELECT COUNT(*) FROM lessons l WHERE l.student_id = s.id AND l.opens_at <= ?2 AND l.closes_at > ?2) AS open_lessons,
        (SELECT MIN(opens_at) FROM lessons l WHERE l.student_id = s.id AND l.opens_at > ?2) AS next_lesson_at,
-       ${BALANCE.replace(/\?1/g, '?2')} AS balance,
+       ${SUMMARY_SQL},
        (SELECT MIN(starts_at) FROM classes c WHERE c.student_id = s.id AND c.status = 'planned' AND c.starts_at > ?2) AS next_class_at
      FROM students s ORDER BY s.archived, s.name COLLATE NOCASE`,
   )
@@ -275,23 +267,21 @@ route('GET', '/students/:id', async (env, _req, [id]) => {
   const scored = sessions.results.filter((x) => x.score !== null);
   const allWords = ls.flatMap((l) => (l.status === 'upcoming' ? [] : l.words));
 
-  // Финансы: уроки и оплаты (недели на месяц вперёд — чтобы было видно, на сколько уроков хватит предоплаты)
-  for (let i = 0; i <= 4; i++) await ensureWeek(env, addWeeks(weekKeyOf(t), i));
-  const [classes, payments, bal] = await Promise.all([
-    env.DB.prepare('SELECT * FROM classes WHERE student_id = ? ORDER BY starts_at DESC LIMIT 80').bind(s.id).all<ClassRow>(),
-    env.DB.prepare('SELECT * FROM payments WHERE student_id = ? ORDER BY paid_at DESC, id DESC LIMIT 100').bind(s.id).all(),
-    balance(env, s.id),
+  // Финансы: отметки «как в заметках» + уроки из расписания (без автоматического подсчёта оплаты)
+  await ensureWeek(env, weekKeyOf(t));
+  const [classes, payments, sum, price] = await Promise.all([
+    env.DB.prepare("SELECT * FROM classes WHERE student_id = ? AND status = 'planned' ORDER BY starts_at DESC LIMIT 40").bind(s.id).all<ClassRow>(),
+    env.DB.prepare(
+      'SELECT p.*, (SELECT COUNT(*) FROM lesson_marks m WHERE m.payment_id = p.id) AS used FROM payments p WHERE student_id = ? ORDER BY paid_at DESC, id DESC LIMIT 100',
+    )
+      .bind(s.id)
+      .all(),
+    summary(env, s.id),
+    studentPrice(env, s.id),
   ]);
-  const alloc = await allocate(env, [s.id]);
-  const upcomingCovered = classes.results.filter((c) => c.status === 'planned' && c.starts_at > t && alloc.get(c.id)?.state === 'paid').length;
 
   return json({
-    finance: {
-      ...bal,
-      prepaid_lessons: upcomingCovered,
-      classes: classes.results.map((c) => ({ ...c, pay: c.status === 'planned' ? alloc.get(c.id) ?? null : null })),
-      payments: payments.results,
-    },
+    finance: { ...sum, price, classes: classes.results, payments: payments.results },
     student: { ...s, invite_code: undefined, invite_link: await inviteLink(env, s.invite_code) },
     stats: {
       lessons_done: past.filter((l) => l.status === 'done').length,
@@ -343,6 +333,7 @@ route('DELETE', '/students/:id', async (env, _req, [id]) => {
     env.DB.prepare('DELETE FROM lessons WHERE student_id = ?').bind(sid),
     env.DB.prepare('DELETE FROM classes WHERE student_id = ?').bind(sid),
     env.DB.prepare('DELETE FROM payments WHERE student_id = ?').bind(sid),
+    env.DB.prepare('DELETE FROM lesson_marks WHERE student_id = ?').bind(sid),
     env.DB.prepare('DELETE FROM students WHERE id = ?').bind(sid),
   ]);
   return json({ ok: true });
@@ -486,7 +477,6 @@ route('GET', '/week', async (env, req) => {
   )
     .bind(week)
     .all<ClassRow & { student_name: string }>();
-  const alloc = await allocate(env, [...new Set(results.map((c) => c.student_id))], end);
 
   // Строки текста недели + оплата для уроков (сопоставляем по имени и времени)
   const byKey = new Map(results.map((c) => [`${norm(c.student_name)}|${c.starts_at}`, c]));
@@ -494,7 +484,7 @@ route('GET', '/week', async (env, req) => {
     ? parse(wt.text).items.map((it) => {
         if (it.kind !== 'lesson' || !it.name) return it;
         const c = byKey.get(`${norm(it.name)}|${slotMs(week, it.day, it.start)}`);
-        return { ...it, class_id: c?.id ?? null, student_id: c?.student_id ?? null, pay: c && c.status === 'planned' ? alloc.get(c.id) ?? null : null };
+        return { ...it, class_id: c?.id ?? null, student_id: c?.student_id ?? null };
       })
     : [];
   const planned = results.filter((c) => c.status === 'planned');
@@ -511,7 +501,6 @@ route('GET', '/week', async (env, req) => {
     totals: {
       lessons: planned.length,
       expected: planned.reduce((a, c) => a + c.price, 0),
-      covered: planned.reduce((a, c) => a + (alloc.get(c.id)?.covered ?? 0), 0),
       cancelled: results.length - planned.length,
     },
   });
@@ -534,84 +523,44 @@ route('POST', '/week/reset', async (env, _req, _p, body) => {
 // ───────── Оплаты ─────────
 
 /**
- * Доска оплат «как в заметках»: по каждому ученику — его оплаты (пакеты) и какие проведённые уроки
- * каждая оплата покрыла (по порядку дат), неоплаченные уроки и сколько уроков оплачено наперёд.
+ * Доска оплат «как в заметках»: по каждому ученику — оплаты с кружками (N уроков),
+ * закрашенные кружки с датами (отметки Златы) и уроки без оплаты (долг).
  */
 route('GET', '/payments-board', async (env) => {
   const t = Date.now();
-  // Будущие уроки на месяц вперёд — чтобы показать, на какие из них хватит предоплаты
-  for (let i = 0; i <= 4; i++) await ensureWeek(env, addWeeks(weekKeyOf(t), i));
-  const [studs, pays, classes, prices, future] = await Promise.all([
+  const [studs, pays, marks, classes] = await Promise.all([
     env.DB.prepare('SELECT id, name FROM students WHERE archived = 0 ORDER BY name COLLATE NOCASE').all<{ id: number; name: string }>(),
-    env.DB.prepare('SELECT id, student_id, amount, lesson_price, note, paid_at FROM payments ORDER BY paid_at, id').all<{
-      id: number; student_id: number; amount: number; lesson_price: number | null; note: string | null; paid_at: number;
+    env.DB.prepare('SELECT id, student_id, amount, lessons, lesson_price, note, paid_at FROM payments ORDER BY paid_at, id').all<{
+      id: number; student_id: number; amount: number; lessons: number | null; lesson_price: number | null; note: string | null; paid_at: number;
     }>(),
-    env.DB.prepare("SELECT id, student_id, starts_at, price FROM classes WHERE status = 'planned' AND starts_at <= ? ORDER BY starts_at, id")
-      .bind(t)
-      .all<{ id: number; student_id: number; starts_at: number; price: number }>(),
-    // Обычная цена ученика: ближайший будущий урок, иначе последний прошедший
-    env.DB.prepare(
-      `SELECT student_id, price FROM classes c WHERE status = 'planned' AND id = (
-         SELECT id FROM classes c2 WHERE c2.student_id = c.student_id AND c2.status = 'planned'
-         ORDER BY (c2.starts_at < ?1), ABS(c2.starts_at - ?1) LIMIT 1)`,
-    )
-      .bind(t)
-      .all<{ student_id: number; price: number }>(),
-    env.DB.prepare("SELECT student_id, starts_at, price FROM classes WHERE status = 'planned' AND starts_at > ? ORDER BY starts_at, id")
-      .bind(t)
+    env.DB.prepare('SELECT id, student_id, payment_id, date, price FROM lesson_marks ORDER BY date, id').all<{
+      id: number; student_id: number; payment_id: number | null; date: string; price: number;
+    }>(),
+    // Уроки из расписания ±3 недели — подсказки дат при отметке кружка
+    env.DB.prepare("SELECT student_id, starts_at, price FROM classes WHERE status = 'planned' AND starts_at BETWEEN ? AND ? ORDER BY starts_at")
+      .bind(t - 21 * DAY, t + 21 * DAY)
       .all<{ student_id: number; starts_at: number; price: number }>(),
   ]);
-  const priceOf = new Map(prices.results.map((r) => [r.student_id, r.price]));
   const out = [];
   for (const st of studs.results) {
     const myPays = pays.results.filter((p) => p.student_id === st.id);
+    const myMarks = marks.results.filter((m) => m.student_id === st.id);
     const myClasses = classes.results.filter((c) => c.student_id === st.id);
-    if (!myPays.length && !myClasses.length) continue;
-    const packages = myPays.map((p) => ({ ...p, left: p.amount, lessons: [] as { date: number; price: number; covered: number }[] }));
-    const unpaid: { date: number; price: number; owed: number }[] = [];
-    let pi = 0;
-    for (const c of myClasses) {
-      let need = c.price;
-      while (need > 0 && pi < packages.length) {
-        const pk = packages[pi];
-        const take = Math.min(pk.left, need);
-        if (take > 0) {
-          pk.lessons.push({ date: c.starts_at, price: c.price, covered: take });
-          pk.left -= take;
-          need -= take;
-        }
-        if (pk.left === 0) pi++;
-      }
-      if (need > 0) unpaid.push({ date: c.starts_at, price: c.price, owed: need });
-    }
-    const leftover = packages.reduce((a, p) => a + p.left, 0);
-    // Цена урока: из расписания, иначе из последней оплаты «уроками», иначе последнего урока
-    const payPrice = [...myPays].reverse().find((p) => p.lesson_price)?.lesson_price ?? null;
-    const price = priceOf.get(st.id) ?? payPrice ?? myClasses[myClasses.length - 1]?.price ?? 0;
-    // Предоплата по будущим урокам из расписания (с их реальными ценами), остаток — по обычной цене
-    const ahead: { date: number | null; price: number }[] = [];
-    let rest = leftover;
-    for (const f of future.results) {
-      if (f.student_id !== st.id || f.price <= 0) continue;
-      if (rest < f.price) break; // уроки оплачиваются по порядку
-      ahead.push({ date: f.starts_at, price: f.price });
-      rest -= f.price;
-    }
-    while (price > 0 && rest >= price && ahead.length < 60) {
-      ahead.push({ date: null, price });
-      rest -= price;
-    }
+    if (!myPays.length && !myMarks.length && !myClasses.length) continue;
+    const payments = myPays.map((p) => ({ ...p, lessons: p.lessons ?? 0, marks: myMarks.filter((m) => m.payment_id === p.id) }));
+    const debts = myMarks.filter((m) => m.payment_id === null || !myPays.some((p) => p.id === m.payment_id));
+    const nearest = [...myClasses].sort((a, b) => (a.starts_at < t ? 1 : 0) - (b.starts_at < t ? 1 : 0) || Math.abs(a.starts_at - t) - Math.abs(b.starts_at - t))[0];
+    const price = nearest?.price ?? [...myPays].reverse().find((p) => p.lesson_price)?.lesson_price ?? 0;
     out.push({
       id: st.id,
       name: st.name,
       price,
-      packages: packages.map(({ left, ...p }) => ({ ...p, left })),
-      unpaid,
-      debt: unpaid.reduce((a, u) => a + u.owed, 0),
-      leftover,
-      ahead,
-      ahead_rest: rest,
-      prepaid_lessons: ahead.length,
+      payments,
+      debts,
+      prepaid: payments.reduce((a, p) => a + Math.max(0, p.lessons - p.marks.length), 0),
+      debt_count: debts.length,
+      debt_sum: debts.reduce((a, d) => a + d.price, 0),
+      lesson_dates: myClasses.map((c) => c.starts_at),
     });
   }
   return json({ students: out });
@@ -623,14 +572,66 @@ route('POST', '/payments', async (env, _req, _p, body) => {
   const amount = int(body.amount, 1, 1e7);
   const paidAt = body.paid_at ? int(body.paid_at, 0, 1e14) : Date.now();
   const lessonPrice = body.lesson_price ? int(body.lesson_price, 1, 1e6) : null;
-  const res = await env.DB.prepare('INSERT INTO payments (student_id, amount, lesson_price, note, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(student.id, amount, lessonPrice, str(body.note, 200), paidAt, Date.now())
+  const lessons = body.lessons ? int(body.lessons, 0, 500) : lessonPrice ? Math.floor(amount / lessonPrice) : 0;
+  const res = await env.DB.prepare(
+    'INSERT INTO payments (student_id, amount, lessons, lesson_price, note, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  )
+    .bind(student.id, amount, lessons, lessonPrice, str(body.note, 200), paidAt, Date.now())
     .run();
-  return json({ id: Number(res.meta.last_row_id), ...(await balance(env, student.id)) });
+  const id = Number(res.meta.last_row_id);
+  const absorbed = await absorbDebts(env, student.id, id); // долги сразу закрываются этой оплатой
+  return json({ id, absorbed, ...(await summary(env, student.id)) });
 });
 
 route('DELETE', '/payments/:id', async (env, _req, [id]) => {
-  await env.DB.prepare('DELETE FROM payments WHERE id = ?').bind(Number(id)).run();
+  // Отметки этой оплаты превращаются в «не оплачено»
+  await env.DB.batch([
+    env.DB.prepare('UPDATE lesson_marks SET payment_id = NULL WHERE payment_id = ?').bind(Number(id)),
+    env.DB.prepare('DELETE FROM payments WHERE id = ?').bind(Number(id)),
+  ]);
+  return json({ ok: true });
+});
+
+// ───────── Отметки уроков (кружки) ─────────
+
+const dateStr = (v: unknown) => {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new HttpError(400, 'Неверная дата');
+  return v;
+};
+
+/** Отметить урок: в указанный кружок оплаты, в первый свободный кружок, или в «не оплачено». */
+route('POST', '/marks', async (env, _req, _p, body) => {
+  const student = await db.getStudent(env, int(body.student_id, 1, 1e9));
+  if (!student) throw new HttpError(404, 'Ученик не найден');
+  const date = dateStr(body.date);
+  let payment: { id: number; lesson_price: number | null } | null = null;
+  if (body.debt) {
+    payment = null;
+  } else if (body.payment_id) {
+    payment = await env.DB.prepare(
+      `SELECT p.id, p.lesson_price FROM payments p WHERE p.id = ? AND p.student_id = ?
+       AND COALESCE(p.lessons, 0) > (SELECT COUNT(*) FROM lesson_marks m WHERE m.payment_id = p.id)`,
+    )
+      .bind(int(body.payment_id, 1, 1e9), student.id)
+      .first();
+    if (!payment) throw new HttpError(400, 'В этой оплате все кружки уже заполнены');
+  } else {
+    payment = await paymentWithFreeSlot(env, student.id);
+  }
+  const price = payment?.lesson_price || (await studentPrice(env, student.id));
+  await env.DB.prepare('INSERT INTO lesson_marks (student_id, payment_id, date, price, created_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(student.id, payment?.id ?? null, date, price, Date.now())
+    .run();
+  return json({ paid: !!payment, ...(await summary(env, student.id)) });
+});
+
+route('PATCH', '/marks/:id', async (env, _req, [id], body) => {
+  await env.DB.prepare('UPDATE lesson_marks SET date = ? WHERE id = ?').bind(dateStr(body.date), Number(id)).run();
+  return json({ ok: true });
+});
+
+route('DELETE', '/marks/:id', async (env, _req, [id]) => {
+  await env.DB.prepare('DELETE FROM lesson_marks WHERE id = ?').bind(Number(id)).run();
   return json({ ok: true });
 });
 

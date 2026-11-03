@@ -307,22 +307,21 @@ async function pageHome() {
 
   const w = d.week;
   html += `<a class="card mt money-week" href="#/schedule">
-      <div><div class="small muted">Эта неделя · ${w.lessons} ${plural(w.lessons, 'урок', 'урока', 'уроков')}</div>
-      <div class="money-big">${money(w.covered)} <span class="muted">из ${money(w.expected)}</span></div>
-      <div class="small muted">оплачено · за 30 дней получено ${money(d.paid_30d)}</div></div>
-      <div class="progress green" style="margin-top:10px"><div style="width:${w.expected ? Math.round((w.covered / w.expected) * 100) : 0}%"></div></div></a>`;
+      <div class="small muted">Эта неделя · ${w.lessons} ${plural(w.lessons, 'урок', 'урока', 'уроков')}</div>
+      <div class="money-big">${money(w.expected)} <span class="muted">по расписанию</span></div>
+      <div class="small muted">за 30 дней внесено оплат: ${money(d.paid_30d)}</div></a>`;
 
   if (d.classes_next.length) {
     html += `<div class="section-title">Ближайшие уроки <a class="link-btn" href="#/schedule">Расписание →</a></div>
       <div class="list">${d.classes_next.map((c) => classRow(c, { showDay: true })).join('')}</div>`;
   }
   if (d.debts.length) {
-    const total = d.debts.reduce((a, x) => a - x.balance, 0);
+    const total = d.debts.reduce((a, x) => a + x.debt_sum, 0);
     html += `<div class="section-title">Долги · ${money(total)} <a class="link-btn" href="#/payments">Все оплаты →</a></div><div class="list">${d.debts
       .map(
-        (x) => `<a class="row" href="#/students/${x.id}"><div class="avatar">${esc(initials(x.name))}</div>
+        (x) => `<a class="row" href="#/payments"><div class="avatar">${esc(initials(x.name))}</div>
         <div class="row-main"><div class="row-title">${esc(x.name)}</div></div>
-        <div class="row-end"><span class="badge red">−${money(-x.balance)}</span></div></a>`,
+        <div class="row-end"><span class="badge red">${lessonsWord(x.debt_count)} · ${money(x.debt_sum)}</span></div></a>`,
       )
       .join('')}</div>`;
   }
@@ -372,7 +371,7 @@ async function pageStudents() {
       <div class="avatar">${esc(initials(s.name))}</div>
       <div class="row-main"><div class="row-title">${esc(s.name)}</div>
       <div class="row-sub" style="display:flex;align-items:center;gap:6px">${sub}</div></div>
-      <div class="row-end"><span class="badge accent">${s.level}</span>${s.balance < 0 ? `<span class="badge red">−${money(-s.balance)}</span>` : s.balance > 0 ? `<span class="badge green">+${money(s.balance)}</span>` : s.avg_score != null ? `<span>⌀ ${s.avg_score}</span>` : ''}</div></a>`;
+      <div class="row-end"><span class="badge accent">${s.level}</span>${s.debt_count ? `<span class="badge red">не опл. ${s.debt_count}</span>` : s.prepaid ? `<span class="badge green">наперёд ${s.prepaid}</span>` : s.avg_score != null ? `<span>⌀ ${s.avg_score}</span>` : ''}</div></a>`;
   };
 
   const active = students.filter((s) => !s.archived);
@@ -599,7 +598,7 @@ async function pageStudent(id) {
       else if (a === 'add-lesson') openLessonForm(s);
       else if (a === 'add-payment') openPaymentSheet(s, data.finance);
       else if (a === 'del-payment') {
-        if (!confirm('Убрать эту оплату? Уроки, которые она покрывала, станут неоплаченными.')) return;
+        if (!confirm('Убрать эту оплату? Закрашенные в ней уроки перейдут в «не оплачено».')) return;
         await api(`/payments/${e.target.closest('[data-id]').dataset.id}`, { method: 'DELETE' });
         toast('Оплата удалена');
         render();
@@ -823,30 +822,27 @@ function classRow(c, { showDay = false, showStudent = true } = {}) {
     <div class="sched-time"><b>${fmtTime(c.starts_at)}</b><span>${showDay ? dayLabel(c.starts_at) : fmtTime(c.ends_at)}</span></div>
     <div class="row-main"><div class="row-title">${showStudent ? esc(c.student_name) : dayLabel(c.starts_at)}</div>
       <div class="row-sub">${money(c.price)}${c.manual ? ' · разовый' : ''}${c.note ? ` · ${esc(c.note)}` : ''}</div></div>
-    <div class="row-end">${payBadge(c)}</div></div>`;
+    <div class="row-end">${cancelled ? '<span class="badge">отменён</span>' : ''}</div></div>`;
 }
 
 function financeBlock(f) {
-  let state;
-  if (f.balance < 0) state = `<div class="money-big red-text">Долг ${money(-f.balance)}</div>`;
-  else if (f.balance > 0) state = `<div class="money-big green-text">Предоплата ${money(f.balance)}</div>
-      <div class="small muted">${f.prepaid_lessons ? `хватит на ${f.prepaid_lessons} ${plural(f.prepaid_lessons, 'следующий урок', 'следующих урока', 'следующих уроков')}` : 'частично покрывает следующий урок'}</div>`;
-  else state = `<div class="money-big">0 ₴</div><div class="small muted">${f.held ? 'всё оплачено' : 'уроков ещё не было'}</div>`;
+  const parts = [];
+  if (f.debt_count) parts.push(`<div class="money-big red-text">Не оплачено ${lessonsWord(f.debt_count)}${f.debt_sum ? ` · ${money(f.debt_sum)}` : ''}</div>`);
+  if (f.prepaid) parts.push(`<div class="money-big green-text">Наперёд ${lessonsWord(f.prepaid)}</div>`);
+  if (!parts.length) parts.push(f.payments.length ? '<div class="money-big">Всё оплачено</div>' : '<div class="money-big muted">Оплат пока нет</div>');
   const now = Date.now();
   const upcoming = f.classes.filter((c) => c.starts_at > now).sort((a, b) => a.starts_at - b.starts_at).slice(0, 4);
-  const past = f.classes.filter((c) => c.starts_at <= now).slice(0, 8);
-  return `<div class="section-title">💰 Оплата <button class="link-btn" data-action="add-payment">+ Внести</button></div>
-    <div class="card">${state}
-      <div class="small muted mt">Проведено уроков: <b>${f.held}</b> на ${money(f.charged)} · оплачено всего ${money(f.paid)}</div></div>
+  return `<div class="section-title">💰 Оплата <a class="link-btn" href="#/payments">Открыть в оплатах →</a></div>
+    <div class="card">${parts.join('')}${f.price ? `<div class="small muted mt">Урок ${money(f.price)}</div>` : ''}
+      <button class="btn secondary block mt" data-action="add-payment">+ Внести оплату</button></div>
     ${upcoming.length ? `<div class="small muted" style="margin:12px 4px 6px">Следующие уроки</div><div class="list">${upcoming.map((c) => classRow(c, { showDay: true, showStudent: false })).join('')}</div>` : ''}
-    ${past.length ? `<div class="small muted" style="margin:12px 4px 6px">Прошедшие уроки</div><div class="list">${past.map((c) => classRow(c, { showDay: true, showStudent: false })).join('')}</div>` : ''}
     ${
       f.payments.length
         ? `<div class="small muted" style="margin:12px 4px 6px">Оплаты</div><div class="list">${f.payments
             .slice(0, 10)
             .map(
-              (p) => `<div class="row" data-id="${p.id}"><div class="row-main"><div class="row-title green-text">+${money(p.amount)}</div>
-            <div class="row-sub">${new Date(p.paid_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}${p.note ? ` · ${esc(p.note)}` : ''}</div></div>
+              (p) => `<div class="row" data-id="${p.id}"><div class="row-main"><div class="row-title green-text">+${money(p.amount)}${p.lessons ? ` · ${lessonsWord(p.lessons)}` : ''}</div>
+            <div class="row-sub">${new Date(p.paid_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}${p.lessons ? ` · закрашено ${p.used} из ${p.lessons}` : ''}</div></div>
             <div class="row-end"><button class="pk-del" data-action="del-payment" aria-label="Убрать оплату">✕ Убрать</button></div></div>`,
             )
             .join('')}</div>`
@@ -860,10 +856,9 @@ async function openPaymentSheet(student, finance = null, defaults = {}) {
   let students = [];
   if (student && !finance) finance = (await api(`/students/${student.id}`)).finance;
   if (!student) students = (await api('/students')).students.filter((s) => !s.archived);
-  const lastPrice = defaults.price || (finance?.classes.find((c) => c.status === 'planned')?.price ?? 0);
-  const debt = finance && finance.balance < 0 ? -finance.balance : 0;
+  const lastPrice = defaults.price || finance?.price || (finance?.classes.find((c) => c.status === 'planned')?.price ?? 0);
   const chips = [];
-  if (debt) chips.push([debt, `Весь долг · ${money(debt)}`]);
+  if (finance?.debt_count) chips.push([finance.debt_sum || finance.debt_count * lastPrice, `Весь долг · ${lessonsWord(finance.debt_count)}`]);
   const { el, close } = sheet(
     student ? `Оплата · ${student.name}` : 'Новая оплата',
     `<form id="f-pay">
@@ -882,7 +877,7 @@ async function openPaymentSheet(student, finance = null, defaults = {}) {
       <p class="small muted" style="margin-top:-6px">Можно числом уроков (сумма посчитается) или просто суммой — если оплатили частично.</p>
       <label class="field"><span>Дата</span><input class="input" type="date" name="date" value="${toLocalInput(Date.now()).slice(0, 10)}" required></label>
       <label class="field"><span>Комментарий (необязательно)</span><input class="input" name="note" maxlength="200" placeholder="Например: наличными"></label>
-      <p class="small muted" style="margin-top:0">Если графика ещё нет — оплата покажется кружками «наперёд». Когда поставишь ученика в расписание, проведённые уроки сами отметятся в этой оплате.</p>
+      <p class="small muted" style="margin-top:0">В «Оплатах» появится столько пустых кружков, сколько уроков. Неоплаченные уроки ученика сразу перейдут в эту оплату.</p>
       <button class="btn block big" type="submit">Внести оплату</button>
     </form>`,
   );
@@ -915,7 +910,7 @@ async function openPaymentSheet(student, finance = null, defaults = {}) {
     if (!b) return;
     $$('#pay-chips .chip', el).forEach((c) => c.classList.toggle('on', c === b));
     amount.value = b.dataset.v;
-    count.value = '';
+    if (finance?.debt_count) count.value = finance.debt_count;
   });
   onSubmit($('#f-pay', el), async (f) => {
     let sid = student?.id;
@@ -932,12 +927,13 @@ async function openPaymentSheet(student, finance = null, defaults = {}) {
         student_id: sid,
         amount: Number(f.amount),
         lesson_price: Number(f.price) > 0 ? Number(f.price) : null,
+        lessons: Number(f.count) > 0 ? Number(f.count) : Number(f.price) > 0 ? Math.floor(Number(f.amount) / Number(f.price)) : 0,
         note: f.note,
         paid_at: today ? Date.now() : new Date(y, m - 1, d, 12).getTime(),
       },
     });
     close();
-    toast(r.balance < 0 ? `Внесено. Остаток долга ${money(-r.balance)}` : r.balance > 0 ? `Внесено. Предоплата ${money(r.balance)}` : 'Внесено. Всё оплачено ✓');
+    toast(`Внесено ✓${r.absorbed ? ` Закрыто долгов: ${r.absorbed}.` : ''}${r.prepaid ? ` Наперёд: ${lessonsWord(r.prepaid)}` : ''}${r.debt_count ? ` Ещё не оплачено: ${lessonsWord(r.debt_count)}` : ''}`);
     render();
   });
 }
@@ -1056,7 +1052,8 @@ function openLessonItem(d, it) {
     </form>
     <p class="small muted">Изменения — только для этой недели. Следующие недели — по постоянному графику.</p>
     <div class="row-gap">
-      ${it.student_id && st === 'ok' ? `<button class="btn secondary block" data-a="pay">💰 Внести оплату</button>` : ''}
+      ${it.student_id && st === 'ok' ? `<button class="btn secondary block" data-a="mark">✓ Отметить урок в оплатах</button>
+      <button class="btn ghost block" data-a="pay">💰 Внести оплату</button>` : ''}
       <button class="btn ghost block" data-a="free">🕳 Убрать урок совсем</button>
       ${it.student_id ? `<button class="btn ghost block" data-a="practice">🤖 Открыть практику с ботом</button>
       <a class="btn ghost block" href="#/students/${it.student_id}">Карточка ученика</a>` : ''}
@@ -1092,9 +1089,15 @@ function openLessonItem(d, it) {
       } else if (a === 'other') {
         close();
         openFreeItem(d, { day: it.day, start: it.start, end: it.end, kind: 'free', line: null, after: it.line });
+      } else if (a === 'mark') {
+        const [y, m, dd] = d.week.split('-').map(Number);
+        const date = isoDate(new Date(y, m - 1, dd + it.day, 12).getTime());
+        const r = await api('/marks', { method: 'POST', body: { student_id: it.student_id, date } });
+        close();
+        toast(r.paid ? `✓ ${it.name}: ${shortDate(date)} — закрашено (осталось наперёд ${r.prepaid})` : `${it.name}: ${shortDate(date)} — оплаченных уроков нет, записано в «не оплачено»`);
       } else if (a === 'pay') {
         close();
-        openPaymentSheet({ id: it.student_id, name: it.name }, null, { amount: it.pay ? it.price - it.pay.covered : it.price });
+        openPaymentSheet({ id: it.student_id, name: it.name }, null, { price: it.price });
       } else if (a === 'free') {
         if (!confirm(`Убрать урок ${it.name} в ${it.start} на этой неделе? Время станет свободным.`)) return;
         await saveWeekLines(
@@ -1263,9 +1266,7 @@ function itemPayBadge(d, it) {
   if (it.status === 'pending') return '<span class="badge amber">⏳ ждёт переноса</span>';
   if (it.status === 'moved') return `<span class="badge blue">→ ${DAY_SHORT[it.to.day]}, ${it.to.time}</span>`;
   if (it.cancelled) return '<span class="badge">отменён</span>';
-  const [y, m, dd] = d.week.split('-').map(Number);
-  const startMs = new Date(y, m - 1, dd + it.day, ...it.start.split(':').map(Number)).getTime();
-  return payBadge({ status: 'planned', pay: it.pay, price: it.price, starts_at: startMs });
+  return '';
 }
 
 async function pageSchedule(week) {
@@ -1311,7 +1312,7 @@ async function pageSchedule(week) {
   html += `<div class="stats three">
       <div class="stat"><div class="stat-value">${t.lessons}</div><div class="stat-label">${plural(t.lessons, 'урок', 'урока', 'уроков')}${t.cancelled ? ` · ${t.cancelled} отм.` : ''}</div></div>
       <div class="stat"><div class="stat-value">${money(t.expected)}</div><div class="stat-label">ожидается</div></div>
-      <div class="stat"><div class="stat-value green-text">${money(t.covered)}</div><div class="stat-label">оплачено</div></div>
+      <div class="stat"><div class="stat-value ${d.items.some((i) => i.status === 'pending') ? 'amber-text' : ''}">${d.items.filter((i) => i.status === 'pending').length}</div><div class="stat-label">ждут переноса</div></div>
     </div>
     <div class="week-actions">
       ${d.edited ? `<span class="badge amber">✏️ неделя изменена</span><button class="link-btn" data-act="reset">↺ Вернуть как в постоянном</button>` : `<span class="small muted">По постоянному графику. Нажми на урок или окно, чтобы изменить только эту неделю.</span>`}
@@ -1559,70 +1560,49 @@ async function pageTextEditor(mode, week = null) {
 }
 
 // ───────── Оплаты (как в заметках) ─────────
-const shortDate = (ts) => new Date(ts).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+// Оплата = N кружков. Злата сама закрашивает кружок и вписывает дату урока.
+// Урок без оплаты — в «Не оплачено». Новая оплата сама забирает неоплаченные уроки в свои кружки.
+const shortDate = (v) => {
+  const d = typeof v === 'string' ? new Date(`${v}T12:00:00`) : new Date(v);
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+};
+const isoDate = (ms) => toLocalInput(ms).slice(0, 10);
 const lessonsWord = (n) => `${n} ${plural(n, 'урок', 'урока', 'уроков')}`;
 
 function payCard(s, { expanded = false } = {}) {
-  // Сводка: долг / наперёд / всё оплачено
   const badges = [];
-  if (s.unpaid.length) badges.push(`<span class="badge red">не оплачено ${lessonsWord(s.unpaid.length)} · ${money(s.debt)}</span>`);
-  if (s.prepaid_lessons) badges.push(`<span class="badge green">наперёд ${lessonsWord(s.prepaid_lessons)}</span>`);
-  else if (s.leftover > 0) badges.push(`<span class="badge green">наперёд ${money(s.leftover)}</span>`);
-  if (!badges.length) badges.push('<span class="badge">всё оплачено</span>');
+  if (s.debt_count) badges.push(`<span class="badge red">не оплачено ${lessonsWord(s.debt_count)}${s.debt_sum ? ` · ${money(s.debt_sum)}` : ''}</span>`);
+  if (s.prepaid) badges.push(`<span class="badge green">наперёд ${lessonsWord(s.prepaid)}</span>`);
+  if (!badges.length) badges.push(s.payments.length ? '<span class="badge">всё оплачено</span>' : '<span class="badge">оплат пока нет</span>');
 
-  // Показываем последние оплаты (как в заметках), старые — по кнопке
-  const pk = s.packages;
-  // Раздать уроки «наперёд» по оплатам: каждая оплата держит столько кружков, на сколько хватает её остатка
-  const aheadOf = new Map(pk.map((p) => [p.id, []]));
-  const left = pk.map((p) => p.left);
-  let pi = 0;
-  for (const a of s.ahead) {
-    while (pi < pk.length && left[pi] <= 0) pi++;
-    if (pi >= pk.length) break;
-    aheadOf.get(pk[pi].id).push(a);
-    let need = a.price;
-    for (let j = pi; j < pk.length && need > 0; j++) {
-      const take = Math.min(left[j], need);
-      left[j] -= take;
-      need -= take;
-    }
-  }
-  const restOf = new Map(pk.map((p, i) => [p.id, Math.max(0, left[i])]));
+  const pk = s.payments;
   const shown = expanded ? pk : pk.slice(-2);
   const hidden = pk.length - shown.length;
 
   const pkHtml = shown
-    .map((p, idx) => {
-      const isLast = p === pk[pk.length - 1];
-      const items = p.lessons.map(
-        (l, i) =>
-          `<div class="pl ${l.covered < l.price ? 'part' : 'done'}"><span class="pl-mark">${l.covered < l.price ? '◐' : '✓'}</span>
-          <span class="pl-n">${i + 1}</span><span class="pl-d">${shortDate(l.date)}</span>${l.covered < l.price ? `<span class="pl-x">${l.covered}/${l.price}</span>` : ''}</div>`,
+    .map((p) => {
+      const cells = [];
+      p.marks.forEach((m, i) =>
+        cells.push(`<button class="pl done" data-mark="${m.id}" data-sid="${s.id}"><span class="pl-mark">✓</span><span class="pl-n">${i + 1}</span><span class="pl-d">${shortDate(m.date)}</span></button>`),
       );
-      // Оплачено наперёд — пустые кружки этой оплаты (с датой будущего урока, если он уже в расписании)
-      aheadOf.get(p.id).forEach((a, i) =>
-        items.push(`<div class="pl empty"><span class="pl-mark">○</span><span class="pl-n">${p.lessons.length + i + 1}</span><span class="pl-d">${a.date ? shortDate(a.date) : ''}</span></div>`),
-      );
-      const rest = isLast ? s.ahead_rest : 0;
+      for (let i = p.marks.length; i < p.lessons; i++) {
+        cells.push(`<button class="pl empty" data-fill="${p.id}" data-sid="${s.id}"><span class="pl-mark"></span><span class="pl-n">${i + 1}</span><span class="pl-d"></span></button>`);
+      }
       return `<div class="pk">
-        <div class="pk-head"><span><b>Оплата ${shortDate(p.paid_at)} · ${money(p.amount)}</b>${p.note ? `<span class="muted"> · ${esc(p.note)}</span>` : ''}</span>
-          <button class="pk-del" data-del-pay="${p.id}" data-label="${esc(`${s.name}: ${money(p.amount)} от ${shortDate(p.paid_at)}`)}" aria-label="Убрать оплату">✕ Убрать</button></div>
-        <div class="pl-grid">${items.join('') || '<span class="small muted">уроков ещё не было</span>'}</div>
-        ${rest > 0 ? `<div class="small muted">+ ${money(rest)} в счёт следующего урока</div>` : ''}
+        <div class="pk-head"><span><b>Оплата ${shortDate(p.paid_at)} · ${money(p.amount)}</b>${p.lessons ? ` · ${lessonsWord(p.lessons)}` : ''}${p.note && !/^\d+ урок/.test(p.note) ? `<span class="muted"> · ${esc(p.note)}</span>` : ''}</span>
+          <button class="pk-del" data-del-pay="${p.id}" data-label="${esc(`${s.name}: ${money(p.amount)} от ${shortDate(p.paid_at)}`)}">✕ Убрать</button></div>
+        ${p.lessons ? `<div class="pl-grid">${cells.join('')}</div>` : '<div class="small muted">Оплата суммой (без числа уроков)</div>'}
       </div>`;
     })
     .join('');
 
-  const unpaidHtml = s.unpaid.length
-    ? `<div class="pk unpaid"><div class="pk-head"><b>Не оплачено</b></div><div class="pl-grid">${s.unpaid
-        .map(
-          (u, i) =>
-            `<div class="pl due"><span class="pl-mark">✗</span><span class="pl-n">${i + 1}</span><span class="pl-d">${shortDate(u.date)}</span>${u.owed < u.price ? `<span class="pl-x">−${u.owed}</span>` : ''}</div>`,
-        )
+  const debtHtml = s.debts.length
+    ? `<div class="pk unpaid"><div class="pk-head"><b>Не оплачено</b></div><div class="pl-grid">${s.debts
+        .map((m, i) => `<button class="pl due" data-mark="${m.id}" data-sid="${s.id}"><span class="pl-mark">✗</span><span class="pl-n">${i + 1}</span><span class="pl-d">${shortDate(m.date)}</span></button>`)
         .join('')}</div></div>`
     : '';
 
-  return `<div class="card pay-card" data-sid="${s.id}" data-name="${esc(s.name.toLowerCase())}">
+  return `<div class="card pay-card" data-name="${esc(s.name.toLowerCase())}">
     <div class="pay-head">
       <a href="#/students/${s.id}" class="pay-name">${esc(s.name)}</a>
       <button class="btn" style="min-height:36px;padding:6px 12px" data-pay="${s.id}">+ Оплата</button>
@@ -1630,28 +1610,76 @@ function payCard(s, { expanded = false } = {}) {
     <div class="pay-badges">${badges.join('')}${s.price ? `<span class="small muted">урок ${money(s.price)}</span>` : ''}</div>
     ${hidden > 0 ? `<button class="link-btn" data-more="${s.id}">Показать ещё ${hidden} ${plural(hidden, 'оплату', 'оплаты', 'оплат')}</button>` : ''}
     ${pkHtml}
-    ${unpaidHtml}
-    ${!pk.length && !s.unpaid.length ? '<p class="small muted">Пока нет ни уроков, ни оплат.</p>' : ''}
+    ${debtHtml}
+    <button class="link-btn mt" data-debt="${s.id}">+ Урок без оплаты</button>
   </div>`;
+}
+
+/** Окно отметки: дата урока (подсказки — уроки ученика из расписания). */
+function openMarkSheet(s, { paymentId = null, mark = null, debt = false } = {}) {
+  const now = Date.now();
+  const dates = [...new Set(s.lesson_dates.map((t) => isoDate(t)))];
+  const used = new Set([...s.payments.flatMap((p) => p.marks), ...s.debts].map((m) => m.date));
+  const title = mark ? `${s.name} · ${shortDate(mark.date)}` : debt ? `${s.name} · урок без оплаты` : `${s.name} · закрасить кружок`;
+  const { el, close } = sheet(
+    title,
+    `<form id="f-mark">
+      ${
+        dates.length
+          ? `<div class="small muted" style="margin-bottom:6px">Уроки по расписанию:</div><div class="chips" id="mark-dates">${dates
+              .map((d) => `<button type="button" class="chip ${used.has(d) ? 'used' : ''}" data-d="${d}">${shortDate(d)}${new Date(`${d}T12:00:00`).getTime() > now ? ' · будет' : ''}</button>`)
+              .join('')}</div>`
+          : ''
+      }
+      <label class="field"><span>Дата урока</span><input class="input" type="date" name="date" required value="${mark ? mark.date : isoDate(now)}"></label>
+      <button class="btn block big" type="submit">${mark ? 'Сохранить дату' : debt ? 'Записать в «не оплачено»' : '✓ Закрасить'}</button>
+    </form>
+    ${mark ? `<button class="btn danger block mt" data-a="clear">${mark.payment_id ? 'Снять отметку (кружок станет пустым)' : 'Удалить из «не оплачено»'}</button>` : ''}`,
+  );
+  $('#mark-dates', el)?.addEventListener('click', (e) => {
+    const c = e.target.closest('[data-d]');
+    if (!c) return;
+    $$('#mark-dates .chip', el).forEach((x) => x.classList.toggle('on', x === c));
+    $('[name=date]', el).value = c.dataset.d;
+  });
+  onSubmit($('#f-mark', el), async (f) => {
+    if (mark) await api(`/marks/${mark.id}`, { method: 'PATCH', body: { date: f.date } });
+    else await api('/marks', { method: 'POST', body: { student_id: s.id, date: f.date, payment_id: paymentId, debt } });
+    close();
+    toast(mark ? 'Дата изменена ✓' : debt ? 'Записано: не оплачено' : `✓ ${shortDate(f.date)}`);
+    render();
+  });
+  el.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-a=clear]')) {
+      try {
+        await api(`/marks/${mark.id}`, { method: 'DELETE' });
+        close();
+        toast('Отметка снята');
+        render();
+      } catch (err) {
+        if (!(err instanceof AuthError)) toast(err.message);
+      }
+    }
+  });
 }
 
 async function pagePayments() {
   setHeader({ title: 'Оплаты' });
   setFab('Оплата', () => openPaymentSheet(null));
   const { students } = await api('/payments-board');
-  const totalDebt = students.reduce((a, s) => a + s.debt, 0);
-  const debtors = students.filter((s) => s.unpaid.length).length;
-  const prepaid = students.filter((s) => s.leftover > 0).length;
+  const totalDebt = students.reduce((a, s) => a + s.debt_sum, 0);
+  const debtors = students.filter((s) => s.debt_count).length;
+  const prepaid = students.filter((s) => s.prepaid).length;
   let filter = 'all';
   const expanded = new Set();
 
   const draw = () => {
     const q = ($('#q')?.value ?? '').trim().toLowerCase();
     const list = students
-      .filter((s) => (filter === 'debt' ? s.unpaid.length : filter === 'prepaid' ? s.leftover > 0 : true))
+      .filter((s) => (filter === 'debt' ? s.debt_count : filter === 'prepaid' ? s.prepaid : true))
       .filter((s) => !q || s.name.toLowerCase().includes(q))
-      // Сначала должники, потом остальные
-      .sort((a, b) => b.debt - a.debt || a.name.localeCompare(b.name, 'ru'));
+      // Сначала должники, потом с предоплатой, потом остальные
+      .sort((a, b) => b.debt_count - a.debt_count || (b.prepaid > 0) - (a.prepaid > 0) || (b.payments.length > 0) - (a.payments.length > 0) || a.name.localeCompare(b.name, 'ru'));
     $('#pay-list').innerHTML = list.length
       ? list.map((s) => payCard(s, { expanded: expanded.has(s.id) })).join('')
       : '<div class="card empty">Никого не найдено</div>';
@@ -1659,7 +1687,7 @@ async function pagePayments() {
 
   $('#view').innerHTML = `
     <div class="stats three">
-      <div class="stat"><div class="stat-value red-text">${money(totalDebt)}</div><div class="stat-label">долг всего</div></div>
+      <div class="stat"><div class="stat-value red-text">${money(totalDebt)}</div><div class="stat-label">не оплачено</div></div>
       <div class="stat"><div class="stat-value">${debtors}</div><div class="stat-label">должны</div></div>
       <div class="stat"><div class="stat-value">${prepaid}</div><div class="stat-label">оплатили наперёд</div></div>
     </div>
@@ -1670,7 +1698,7 @@ async function pagePayments() {
     </div>
     <label class="search">${icon('search')}<input class="input" type="search" placeholder="Поиск по имени" id="q" autocomplete="off"></label>
     <div id="pay-list" class="row-gap"></div>
-    <p class="small muted" style="text-align:center">✓ — урок оплачен · ◐ — оплачен частично · ○ — оплачено наперёд · ✗ — не оплачен</p>`;
+    <p class="small muted" style="text-align:center">Нажми на пустой кружок, чтобы закрасить его и вписать дату урока.<br>✓ — проведён и оплачен · ○ — оплачен, ещё не проведён · ✗ — не оплачен</p>`;
   draw();
 
   $('#q').oninput = draw;
@@ -1681,15 +1709,26 @@ async function pagePayments() {
     $$('#pay-filter .chip').forEach((c) => c.classList.toggle('on', c === b));
     draw();
   };
+  const byId = (id) => students.find((x) => x.id === Number(id));
   $('#view').onclick = async (e) => {
     const more = e.target.closest('[data-more]');
     if (more) {
       expanded.add(Number(more.dataset.more));
       return draw();
     }
+    const fill = e.target.closest('[data-fill]');
+    if (fill) return openMarkSheet(byId(fill.dataset.sid), { paymentId: Number(fill.dataset.fill) });
+    const mk = e.target.closest('[data-mark]');
+    if (mk) {
+      const s = byId(mk.dataset.sid);
+      const mark = [...s.payments.flatMap((p) => p.marks), ...s.debts].find((m) => m.id === Number(mk.dataset.mark));
+      return openMarkSheet(s, { mark });
+    }
+    const debt = e.target.closest('[data-debt]');
+    if (debt) return openMarkSheet(byId(debt.dataset.debt), { debt: true });
     const del = e.target.closest('[data-del-pay]');
     if (del) {
-      if (!confirm(`Убрать оплату ${del.dataset.label}? Уроки, которые она покрывала, станут неоплаченными.`)) return;
+      if (!confirm(`Убрать оплату ${del.dataset.label}? Закрашенные в ней уроки перейдут в «не оплачено».`)) return;
       try {
         await api(`/payments/${del.dataset.delPay}`, { method: 'DELETE' });
         toast('Оплата убрана');
@@ -1701,7 +1740,7 @@ async function pagePayments() {
     }
     const pay = e.target.closest('[data-pay]');
     if (pay) {
-      const s = students.find((x) => x.id === Number(pay.dataset.pay));
+      const s = byId(pay.dataset.pay);
       openPaymentSheet({ id: s.id, name: s.name }, null, { price: s.price });
     }
   };

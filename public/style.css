@@ -436,3 +436,11 @@ textarea.tpl {
 .pk-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .pk-del { border: 1px solid var(--line); background: var(--surface); color: var(--red); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; }
 .pk-del:hover { background: var(--red-soft); }
+
+/* ───────── Кружки оплат (ручные отметки) ───────── */
+button.pl { font: inherit; color: inherit; background: var(--surface); cursor: pointer; text-align: left; }
+.pl.empty .pl-mark { border: 1.5px solid var(--line-strong); }
+.pl.empty:hover { border-color: var(--accent); }
+.pl.empty:hover .pl-mark { border-color: var(--accent); }
+.chip.used { opacity: .55; }
+.amber-text { color: var(--amber); }
