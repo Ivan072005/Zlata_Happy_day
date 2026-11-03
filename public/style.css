@@ -439,3 +439,17 @@ button.pl { font: inherit; color: inherit; background: var(--surface); cursor: p
 .tabbar a.on svg { filter: drop-shadow(0 2px 6px color-mix(in srgb, var(--accent) 45%, transparent)); }
 .fab { box-shadow: 0 10px 28px color-mix(in srgb, var(--accent) 45%, transparent); }
 .btn:not(.secondary):not(.ghost):not(.danger) { box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 28%, transparent); }
+
+/* ───────── Тёмная тема (включается кнопкой ☀️/🌙) ───────── */
+:root[data-theme="dark"] {
+  --bg: #0c1a18; --surface: #132624; --surface-2: #1b3230; --text: #e6f6f2; --muted: #8fb3ab; --border: #24403c;
+  --accent: #2dd4bf; --accent-soft: #123d38; --on-accent: #04201c; --green: #4ade80; --green-soft: #12351f;
+  --amber: #fbbf24; --amber-soft: #3a2f12; --red: #fb7185; --red-soft: #3d1a22; --blue: #60a5fa; --blue-soft: #14294a;
+  --gray-soft: #1c2f2c; --shadow: none; --shadow-lg: 0 12px 32px rgba(0, 0, 0, .5);
+  --line: #27443f; --line-strong: #35605a;
+  --d0: #2dd4bf; --d1: #60a5fa; --d2: #a78bfa; --d3: #fb7185; --d4: #fbbf24; --d5: #f472b6; --d6: #4ade80;
+  color-scheme: dark;
+}
+.theme-btn { font-size: 20px; line-height: 1; }
+
+@media (max-width: 480px) { .hide-sm { display: none; } }

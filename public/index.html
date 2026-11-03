@@ -6,7 +6,10 @@
   <title>English Bot · Панель</title>
   <meta name="description" content="Панель преподавателя: ученики, занятия и статистика">
   <meta name="theme-color" content="#eefaf6">
-  <meta name="color-scheme" content="light only">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try { if (localStorage.getItem('theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch (e) {}
+  </script>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -21,6 +24,7 @@
     <button class="icon-btn" id="back" hidden aria-label="Назад"></button>
     <h1 id="title">English Bot</h1>
     <div id="appbar-action"></div>
+    <button class="icon-btn theme-btn" id="theme-toggle" aria-label="Тёмная / светлая тема" title="Тёмная / светлая тема">🌙</button>
   </header>
 
   <main id="view" class="view"></main>

@@ -1274,7 +1274,7 @@ async function pageSchedule(week) {
   schedStudents = st.students.filter((s) => !s.archived);
   setHeader({
     title: 'Расписание',
-    action: `<a class="btn secondary" style="min-height:38px;padding:6px 12px" href="#/template">📋 Постоянный график</a>`,
+    action: `<a class="btn secondary" style="min-height:38px;padding:6px 12px" href="#/template">📋 Постоянный<span class="hide-sm"> график</span></a>`,
   });
   setFab('Урок', () => openAddItem(d));
 
@@ -1845,6 +1845,12 @@ async function pageSettings() {
       ${s.bot_username ? `<p class="small muted" style="margin:12px 0 0">Бот: <a href="https://t.me/${esc(s.bot_username)}" target="_blank" rel="noopener">@${esc(s.bot_username)}</a></p>` : ''}
     </div>
 
+    <div class="section-title">Внешний вид</div>
+    <div class="card" style="padding-top:4px;padding-bottom:4px">
+      <div class="switch-row"><div><b>Тёмная тема</b><small>Также переключается кнопкой 🌙 / ☀️ вверху справа</small></div>
+        <label class="switch"><input type="checkbox" data-theme-switch ${isDark() ? 'checked' : ''}><span></span></label></div>
+    </div>
+
     <div class="section-title">Практика с ботом</div>
     <a class="card row" href="#/topics" style="min-height:0">
       <div class="row-main"><div class="row-title">📚 Темы для практики</div><div class="row-sub">Сценарии и слова для разговоров с ботом</div></div>
@@ -1921,6 +1927,7 @@ async function pageSettings() {
       if (!(err instanceof AuthError)) toast(err.message);
     }
   };
+  $$('[data-theme-switch]').forEach((inp) => (inp.onchange = () => applyTheme(inp.checked)));
   $$('[data-setting]').forEach(
     (inp) =>
       (inp.onchange = async () => {
@@ -1974,6 +1981,22 @@ function paint(root = document) {
   });
 }
 new MutationObserver(() => paint()).observe(document.body, { childList: true, subtree: true });
+
+// ───────── Тема: светлая / тёмная ─────────
+const isDark = () => document.documentElement.dataset.theme === 'dark';
+function applyTheme(dark) {
+  if (dark) document.documentElement.dataset.theme = 'dark';
+  else delete document.documentElement.dataset.theme;
+  try {
+    localStorage.setItem('theme', dark ? 'dark' : 'light');
+  } catch {}
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? '#0c1a18' : '#eefaf6');
+  const b = $('#theme-toggle');
+  if (b) b.textContent = dark ? '☀️' : '🌙';
+  $$('[data-theme-switch]').forEach((s) => (s.checked = dark));
+}
+$('#theme-toggle').onclick = () => applyTheme(!isDark());
+applyTheme(isDark());
 
 // ───────── Старт ─────────
 $$('[data-icon]').forEach((el) => (el.outerHTML = icon(el.dataset.icon)));
