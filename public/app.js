@@ -856,46 +856,85 @@ function financeBlock(f) {
 
 /** Окно «Внести оплату». */
 async function openPaymentSheet(student, finance = null, defaults = {}) {
-  if (!finance) finance = (await api(`/students/${student.id}`)).finance;
-  const lastPrice = defaults.price || (finance.classes.find((c) => c.status === 'planned')?.price ?? 0);
-  const debt = finance.balance < 0 ? -finance.balance : 0;
+  // student = null → оплата «с нуля»: можно выбрать ученика или вписать нового (до того, как известен график)
+  let students = [];
+  if (student && !finance) finance = (await api(`/students/${student.id}`)).finance;
+  if (!student) students = (await api('/students')).students.filter((s) => !s.archived);
+  const lastPrice = defaults.price || (finance?.classes.find((c) => c.status === 'planned')?.price ?? 0);
+  const debt = finance && finance.balance < 0 ? -finance.balance : 0;
   const chips = [];
   if (debt) chips.push([debt, `Весь долг · ${money(debt)}`]);
-  if (lastPrice) for (const n of [1, 4, 8]) chips.push([lastPrice * n, `${n} ${plural(n, 'урок', 'урока', 'уроков')} · ${money(lastPrice * n)}`]);
   const { el, close } = sheet(
-    `Оплата · ${student.name}`,
+    student ? `Оплата · ${student.name}` : 'Новая оплата',
     `<form id="f-pay">
+      ${
+        student
+          ? ''
+          : `<label class="field"><span>Ученик</span><input class="input" name="name" list="pay-students" required maxlength="80" placeholder="Имя (новый ученик создастся сам)" autocomplete="off">
+          <datalist id="pay-students">${students.map((s) => `<option value="${esc(s.name)}">`).join('')}</datalist></label>`
+      }
       ${chips.length ? `<div class="chips" id="pay-chips">${chips.map(([v, l]) => `<button type="button" class="chip" data-v="${v}">${l}</button>`).join('')}</div>` : ''}
-      ${lastPrice ? `<div class="grid-2">
-        <label class="field"><span>Сколько уроков</span><input class="input" type="number" name="count" min="1" max="100" inputmode="numeric" placeholder="8"><small>по ${money(lastPrice)}</small></label>
-        <label class="field"><span>Сумма, ₴</span><input class="input" type="number" name="amount" min="1" step="1" required inputmode="numeric" value="${defaults.amount ?? ''}" placeholder="${lastPrice}"></label>
-      </div>` : `<label class="field"><span>Сумма, ₴</span><input class="input" type="number" name="amount" min="1" step="1" required inputmode="numeric" value="${defaults.amount ?? ''}" placeholder="350"></label>`}
+      <div class="grid-3">
+        <label class="field"><span>Сколько уроков</span><input class="input" type="number" name="count" min="1" max="100" inputmode="numeric" placeholder="8"></label>
+        <label class="field"><span>Цена урока, ₴</span><input class="input" type="number" name="price" min="1" inputmode="numeric" value="${lastPrice || ''}" placeholder="350"></label>
+        <label class="field"><span>Сумма, ₴</span><input class="input" type="number" name="amount" min="1" step="1" required inputmode="numeric" value="${defaults.amount ?? ''}" placeholder="2800"></label>
+      </div>
+      <p class="small muted" style="margin-top:-6px">Можно числом уроков (сумма посчитается) или просто суммой — если оплатили частично.</p>
       <label class="field"><span>Дата</span><input class="input" type="date" name="date" value="${toLocalInput(Date.now()).slice(0, 10)}" required></label>
-      <label class="field"><span>Комментарий (необязательно)</span><input class="input" name="note" maxlength="200" placeholder="Например: пакет 8 уроков, наличными"></label>
-      <p class="small muted" style="margin-top:0">Можно внести любую сумму: за урок, пакетом или частично. Деньги сами распределятся по урокам по порядку.</p>
+      <label class="field"><span>Комментарий (необязательно)</span><input class="input" name="note" maxlength="200" placeholder="Например: наличными"></label>
+      <p class="small muted" style="margin-top:0">Если графика ещё нет — оплата покажется кружками «наперёд». Когда поставишь ученика в расписание, проведённые уроки сами отметятся в этой оплате.</p>
       <button class="btn block big" type="submit">Внести оплату</button>
     </form>`,
   );
-  $('[name=count]', el)?.addEventListener('input', (e) => {
-    const n = Number(e.target.value);
-    if (n > 0) {
-      $('[name=amount]', el).value = n * lastPrice;
-      if (!$('[name=note]', el).value || /^\d+ урок/.test($('[name=note]', el).value)) $('[name=note]', el).value = `${n} ${plural(n, 'урок', 'урока', 'уроков')}`;
+  const count = $('[name=count]', el);
+  const price = $('[name=price]', el);
+  const amount = $('[name=amount]', el);
+  const note = $('[name=note]', el);
+  const recalc = () => {
+    const n = Number(count.value);
+    const p = Number(price.value);
+    if (n > 0 && p > 0) amount.value = n * p;
+    if (n > 0 && (!note.value || /^\d+ урок/.test(note.value))) note.value = `${n} ${plural(n, 'урок', 'урока', 'уроков')}`;
+  };
+  count.addEventListener('input', recalc);
+  price.addEventListener('input', recalc);
+  $('[name=name]', el)?.addEventListener('change', async (e) => {
+    // Существующий ученик: подставить его цену урока
+    const s = students.find((x) => x.name.trim().toLowerCase() === e.target.value.trim().toLowerCase());
+    if (s && !price.value) {
+      const f = (await api(`/students/${s.id}`)).finance;
+      const p = f.classes.find((c) => c.status === 'planned')?.price;
+      if (p) {
+        price.value = p;
+        recalc();
+      }
     }
   });
   $('#pay-chips', el)?.addEventListener('click', (e) => {
     const b = e.target.closest('[data-v]');
     if (!b) return;
     $$('#pay-chips .chip', el).forEach((c) => c.classList.toggle('on', c === b));
-    $('[name=amount]', el).value = b.dataset.v;
-    if (/урок/.test(b.textContent) && !$('[name=note]', el).value) $('[name=note]', el).value = b.textContent.split(' · ')[0];
+    amount.value = b.dataset.v;
+    count.value = '';
   });
   onSubmit($('#f-pay', el), async (f) => {
+    let sid = student?.id;
+    if (!sid) {
+      const name = f.name.trim();
+      const found = students.find((x) => x.name.trim().toLowerCase() === name.toLowerCase());
+      sid = found ? found.id : (await api('/students', { method: 'POST', body: { name, level: 'B1' } })).ids[0];
+    }
     const [y, m, d] = f.date.split('-').map(Number);
     const today = toLocalInput(Date.now()).slice(0, 10) === f.date;
     const r = await api('/payments', {
       method: 'POST',
-      body: { student_id: student.id, amount: Number(f.amount), note: f.note, paid_at: today ? Date.now() : new Date(y, m - 1, d, 12).getTime() },
+      body: {
+        student_id: sid,
+        amount: Number(f.amount),
+        lesson_price: Number(f.price) > 0 ? Number(f.price) : null,
+        note: f.note,
+        paid_at: today ? Date.now() : new Date(y, m - 1, d, 12).getTime(),
+      },
     });
     close();
     toast(r.balance < 0 ? `Внесено. Остаток долга ${money(-r.balance)}` : r.balance > 0 ? `Внесено. Предоплата ${money(r.balance)}` : 'Внесено. Всё оплачено ✓');
@@ -1598,6 +1637,7 @@ function payCard(s, { expanded = false } = {}) {
 
 async function pagePayments() {
   setHeader({ title: 'Оплаты' });
+  setFab('Оплата', () => openPaymentSheet(null));
   const { students } = await api('/payments-board');
   const totalDebt = students.reduce((a, s) => a + s.debt, 0);
   const debtors = students.filter((s) => s.unpaid.length).length;

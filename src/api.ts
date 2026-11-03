@@ -69,7 +69,20 @@ const routes: [string, RegExp, Handler][] = [];
 const route = (method: string, path: string, h: Handler) =>
   routes.push([method, new RegExp(`^${path.replace(/:id/g, '(\\d+)')}$`), h]);
 
+/** Небольшие обновления структуры базы (выполняются один раз после обновления, сами). */
+let migrated = false;
+async function migrate(env: Env) {
+  if (migrated) return;
+  try {
+    await env.DB.prepare('ALTER TABLE payments ADD COLUMN lesson_price INTEGER').run();
+  } catch {
+    // колонка уже есть
+  }
+  migrated = true;
+}
+
 export async function handleApi(req: Request, env: Env): Promise<Response> {
+  await migrate(env);
   const url = new URL(req.url);
   const path = url.pathname.replace(/^\/api/, '') || '/';
 
@@ -530,8 +543,8 @@ route('GET', '/payments-board', async (env) => {
   for (let i = 0; i <= 4; i++) await ensureWeek(env, addWeeks(weekKeyOf(t), i));
   const [studs, pays, classes, prices, future] = await Promise.all([
     env.DB.prepare('SELECT id, name FROM students WHERE archived = 0 ORDER BY name COLLATE NOCASE').all<{ id: number; name: string }>(),
-    env.DB.prepare('SELECT id, student_id, amount, note, paid_at FROM payments ORDER BY paid_at, id').all<{
-      id: number; student_id: number; amount: number; note: string | null; paid_at: number;
+    env.DB.prepare('SELECT id, student_id, amount, lesson_price, note, paid_at FROM payments ORDER BY paid_at, id').all<{
+      id: number; student_id: number; amount: number; lesson_price: number | null; note: string | null; paid_at: number;
     }>(),
     env.DB.prepare("SELECT id, student_id, starts_at, price FROM classes WHERE status = 'planned' AND starts_at <= ? ORDER BY starts_at, id")
       .bind(t)
@@ -572,7 +585,9 @@ route('GET', '/payments-board', async (env) => {
       if (need > 0) unpaid.push({ date: c.starts_at, price: c.price, owed: need });
     }
     const leftover = packages.reduce((a, p) => a + p.left, 0);
-    const price = priceOf.get(st.id) ?? myClasses[myClasses.length - 1]?.price ?? 0;
+    // Цена урока: из расписания, иначе из последней оплаты «уроками», иначе последнего урока
+    const payPrice = [...myPays].reverse().find((p) => p.lesson_price)?.lesson_price ?? null;
+    const price = priceOf.get(st.id) ?? payPrice ?? myClasses[myClasses.length - 1]?.price ?? 0;
     // Предоплата по будущим урокам из расписания (с их реальными ценами), остаток — по обычной цене
     const ahead: { date: number | null; price: number }[] = [];
     let rest = leftover;
@@ -607,8 +622,9 @@ route('POST', '/payments', async (env, _req, _p, body) => {
   if (!student) throw new HttpError(404, 'Ученик не найден');
   const amount = int(body.amount, 1, 1e7);
   const paidAt = body.paid_at ? int(body.paid_at, 0, 1e14) : Date.now();
-  const res = await env.DB.prepare('INSERT INTO payments (student_id, amount, note, paid_at, created_at) VALUES (?, ?, ?, ?, ?)')
-    .bind(student.id, amount, str(body.note, 200), paidAt, Date.now())
+  const lessonPrice = body.lesson_price ? int(body.lesson_price, 1, 1e6) : null;
+  const res = await env.DB.prepare('INSERT INTO payments (student_id, amount, lesson_price, note, paid_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(student.id, amount, lessonPrice, str(body.note, 200), paidAt, Date.now())
     .run();
   return json({ id: Number(res.meta.last_row_id), ...(await balance(env, student.id)) });
 });

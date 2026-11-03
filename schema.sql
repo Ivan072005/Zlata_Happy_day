@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   student_id INTEGER NOT NULL,
   amount INTEGER NOT NULL,
+  lesson_price INTEGER,                        -- цена урока, если оплатили числом уроков
   note TEXT,
   paid_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
