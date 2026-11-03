@@ -8,7 +8,9 @@
 //   11:00                    ← свободное окно
 //   9:00 — 12:00             ← свободные слоты 9, 10, 11, 12 (до 13:00)
 //   9:00 — 12:00 занято      ← занято / нерабочее время (слова: занято, перерыв, выходной, нерабочее)
-//   17:00 Ева 350 отмена     ← урок отменён (не считается)
+//   17:00 Ева 350 отмена     ← урок отменён без переноса (не считается)
+//   17:00 Ева 350 перенос    ← отменён, ждёт переноса
+//   17:00 Ева 350 перенос → ср 16:00   и   16:00 Ева 350 с вт 17:00   ← перенос
 // Время — это начало часового слота, поэтому промежуток «А — Б» длится до Б + 1 час.
 // Пустые строки, заголовки и значки в начале строки (|, -, •, >) игнорируются.
 
@@ -22,6 +24,28 @@ const DAYS = [
   ['воскресенье', 'вс', 'нд', 'неділя', 'sunday', 'sun'],
 ];
 export const DAY_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'];
+export const DAY_SHORT = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
+
+const dayOf = (token) => DAYS.findIndex((names) => names.includes(String(token).toLowerCase().replace(/[.,:]+$/, '')));
+
+/**
+ * Отметка после цены:
+ *   отмена                     — урок не состоялся, без переноса
+ *   перенос                    — отменён, ждёт переноса
+ *   перенос → ср 16:00         — перенесён на другое время (здесь не считается)
+ *   с пн 10:00                 — этот урок — перенос с другого времени
+ */
+function parseMark(tail) {
+  const t = tail.trim();
+  if (!t) return { status: 'ok' };
+  if (/^(отмена|отменен[оа]?|отменили|отменён|cancel(?:led)?|❌)$/i.test(t)) return { status: 'cancelled' };
+  if (/^перенос$/i.test(t)) return { status: 'pending' };
+  let m = t.match(new RegExp(`^перенос\\s*(?:→|->|=>|на)\\s*(\\S+)\\s+${TIME}$`, 'i'));
+  if (m && dayOf(m[1]) >= 0 && normTime(m[2], m[3])) return { status: 'moved', to: { day: dayOf(m[1]), time: normTime(m[2], m[3]) } };
+  m = t.match(new RegExp(`^(?:перенос\\s+)?с\\s+(\\S+)\\s+${TIME}$`, 'i'));
+  if (m && dayOf(m[1]) >= 0 && normTime(m[2], m[3])) return { status: 'ok', from: { day: dayOf(m[1]), time: normTime(m[2], m[3]) } };
+  return null;
+}
 
 const TIME = '(\\d{1,2})[:.](\\d{2})';
 const RANGE_SEP = '\\s*[-–—]\\s*';
@@ -87,9 +111,14 @@ export function parseSchedule(text, defaultMinutes = 60) {
       return;
     }
 
-    const p = rest.match(/^(.*?)[\s,]+(\d{1,6})\s*(?:грн\.?|₴|uah)?(?:\s*[-—,]?\s*(отмена|отменен[оа]?|отменили|отменён|cancel(?:led)?|❌))?$/i);
+    const p = rest.match(/^(.*?)[\s,]+(\d{1,6})\s*(?:грн\.?|₴|uah)?(?:\s*[-—,]?\s*((?:отмен|cancel|❌|перенос|с\s).*))?$/i);
     if (!p || !p[1].trim()) {
       errors.push({ line, text: raw, message: 'Укажи имя и цену, например «10:00 Мария 350»' });
+      return;
+    }
+    const mark = parseMark(p[3] ?? '');
+    if (!mark) {
+      errors.push({ line, text: raw, message: 'Непонятная отметка. Можно: «отмена», «перенос», «перенос → ср 16:00», «с пн 10:00»' });
       return;
     }
     const end = endRaw ?? fromMinutes(toMinutes(start) + defaultMinutes);
@@ -97,7 +126,10 @@ export function parseSchedule(text, defaultMinutes = 60) {
       errors.push({ line, text: raw, message: 'Конец должен быть позже начала' });
       return;
     }
-    items.push({ day, start, end, kind: 'lesson', name: p[1].trim().replace(/[,;:]+$/, ''), price: Number(p[2]), cancelled: !!p[3], line });
+    items.push({
+      day, start, end, kind: 'lesson', name: p[1].trim().replace(/[,;:]+$/, ''), price: Number(p[2]),
+      status: mark.status, cancelled: mark.status !== 'ok', to: mark.to, from: mark.from, line,
+    });
   });
 
   items.sort((a, b) => a.day - b.day || toMinutes(a.start) - toMinutes(b.start));
@@ -108,7 +140,15 @@ export function parseSchedule(text, defaultMinutes = 60) {
 export function formatLine(it, defaultMinutes = 60) {
   const dur = toMinutes(it.end) - toMinutes(it.start);
   const range = dur > defaultMinutes ? ` — ${fromMinutes(toMinutes(it.end) - defaultMinutes)}` : '';
-  if (it.kind === 'lesson') return `${it.start}${range} ${it.name} ${it.price}${it.cancelled ? ' отмена' : ''}`;
+  if (it.kind === 'lesson') {
+    const st = it.status ?? (it.cancelled ? 'cancelled' : 'ok');
+    let mark = '';
+    if (st === 'cancelled') mark = ' отмена';
+    else if (st === 'pending') mark = ' перенос';
+    else if (st === 'moved' && it.to) mark = ` перенос → ${DAY_SHORT[it.to.day]} ${it.to.time}`;
+    else if (it.from) mark = ` с ${DAY_SHORT[it.from.day]} ${it.from.time}`;
+    return `${it.start}${range} ${it.name} ${it.price}${mark}`;
+  }
   if (it.kind === 'busy') return `${it.start}${range} занято`;
   return `${it.start}${range}`;
 }

@@ -1,5 +1,5 @@
 // Панель преподавателя. Без сборки и зависимостей: обычный JS.
-import { parseSchedule, DAY_NAMES, formatLine, dayIndex } from '/parser.js';
+import { parseSchedule, DAY_NAMES, DAY_SHORT, formatLine, dayIndex } from '/parser.js';
 
 const LEVELS = ['A1', 'A2', 'B1', 'B2', 'C1'];
 const STATUS = {
@@ -980,66 +980,81 @@ function priceOf(d, name) {
   return d.items.find((i) => i.kind === 'lesson' && i.name.trim().toLowerCase() === n)?.price ?? '';
 }
 
-/** Урок недели: всё редактируется. */
+/** Урок недели: всё редактируется, отмена с переносом. */
 function openLessonItem(d, it) {
+  const st = it.status ?? (it.cancelled ? 'cancelled' : 'ok');
+  const statusSel = `<label class="field"><span>Статус</span><select class="input" name="status">
+      <option value="ok" ${st === 'ok' ? 'selected' : ''}>Проводится</option>
+      <option value="pending" ${st === 'pending' ? 'selected' : ''}>Отменён — нужно перенести</option>
+      <option value="cancelled" ${st === 'cancelled' ? 'selected' : ''}>Отменён без переноса</option>
+      ${st === 'moved' ? `<option value="moved" selected>Перенесён → ${DAY_SHORT[it.to.day]}, ${it.to.time}</option>` : ''}
+    </select></label>`;
   const { el, close } = sheet(
     `${DAY_NAMES[it.day]}, ${it.start}`,
-    `${it.cancelled ? '' : `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>${esc(it.name)}</b>${itemPayBadge(d, it)}</div>`}
-    <form id="f-item" class="${it.cancelled ? '' : 'mt'}">
-      ${lessonFields(it, { withDay: true })}
-      <div class="switch-row" style="padding-top:0"><div><b>Отменён</b><small>Отменённый урок не считается и не оплачивается</small></div>
-        <label class="switch"><input type="checkbox" name="cancelled" ${it.cancelled ? 'checked' : ''}><span></span></label></div>
-      <button class="btn block big mt" type="submit">Сохранить</button>
+    `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>${esc(it.name)}</b>${itemPayBadge(d, it)}</div>
+    ${it.from ? `<p class="small muted">↩ Это перенос с ${DAY_NAMES[it.from.day].toLowerCase()}, ${it.from.time}</p>` : ''}
+    <div class="row-gap mt">
+      ${st === 'ok' || st === 'pending' ? `<button class="btn ${st === 'pending' ? '' : 'secondary'} block" data-a="move">↪ Перенести на другое время</button>` : ''}
+      ${st === 'ok' ? `<button class="btn ghost block" data-a="cancel-move">⏳ Отменить и перенести позже</button>` : ''}
+      ${st !== 'ok' ? `<button class="btn ghost block" data-a="other">➕ Поставить другого ученика в это время</button>` : ''}
+    </div>
+    <form id="f-item" class="mt">
+      ${lessonFields(it)}
+      ${statusSel}
+      <button class="btn block big" type="submit">Сохранить</button>
     </form>
     <p class="small muted">Изменения — только для этой недели. Следующие недели — по постоянному графику.</p>
     <div class="row-gap">
-      ${it.student_id && !it.cancelled ? `<button class="btn secondary block" data-a="pay">💰 Внести оплату</button>` : ''}
-      <button class="btn ghost block" data-a="free">🕳 Освободить окно (убрать урок)</button>
+      ${it.student_id && st === 'ok' ? `<button class="btn secondary block" data-a="pay">💰 Внести оплату</button>` : ''}
+      <button class="btn ghost block" data-a="free">🕳 Убрать урок совсем</button>
       ${it.student_id ? `<button class="btn ghost block" data-a="practice">🤖 Открыть практику с ботом</button>
       <a class="btn ghost block" href="#/students/${it.student_id}">Карточка ученика</a>` : ''}
     </div>`,
   );
+
+  // Связанные уроки переноса: откуда пришёл этот урок / куда ушёл
+  const origin = it.from
+    ? d.items.find((o) => o.kind === 'lesson' && o.status === 'moved' && o.name === it.name && o.day === it.from.day && o.start === it.from.time)
+    : null;
+  const target =
+    st === 'moved' ? d.items.find((o) => o.kind === 'lesson' && o.from && o.name === it.name && o.from.day === it.day && o.from.time === it.start) : null;
+
   onSubmit($('#f-item', el), async (f) => {
-    const day = Number(f.day);
-    const start = f.start.slice(0, 5);
-    const moved = day !== it.day || start !== it.start;
-    await saveWeekLines(
-      d,
-      (lines) => {
-        const text = lineFromForm(f, { cancelled: !!f.cancelled });
-        if (!moved) {
-          lines[it.line - 1] = text;
-          return;
-        }
-        // Переставили: на новое место (заняв свободное окно, если оно там есть), старое место — свободно.
-        // Сначала правим строки ниже, чтобы номера строк выше не сдвинулись.
-        const freeOld = formatLine({ kind: 'free', start: it.start, end: it.end });
-        const target = d.items.find(
-          (i) => i.day === day && i.kind === 'free' && toMinutesStr(i.start) <= toMinutesStr(start) && toMinutesStr(i.end) >= toMinutesStr(start) + Number(f.dur),
-        );
-        const targetLine = target ? target.line : (d.items.filter((i) => i.day === day && toMinutesStr(i.start) <= toMinutesStr(start)).pop()?.line ?? 0) + 0.5;
-        if (targetLine > it.line) {
-          placeLesson(lines, d.items, day, toMinutesStr(start), Number(f.dur), text, it.line);
-          lines[it.line - 1] = freeOld;
-        } else {
-          lines[it.line - 1] = freeOld;
-          placeLesson(lines, d.items, day, toMinutesStr(start), Number(f.dur), text, it.line);
-        }
-      },
-      moved ? `${it.name}: ${DAY_NAMES[day]}, ${start} ✓` : 'Сохранено ✓',
-    );
+    const status = f.status;
+    await saveWeekLines(d, (lines) => {
+      lines[it.line - 1] = lineFromForm(f, { status, to: status === 'moved' ? it.to : undefined, from: status === 'ok' ? it.from : undefined });
+      // Перенесённый урок вернули обратно — урок-перенос на новом месте убираем
+      if (st === 'moved' && status !== 'moved' && target) lines[target.line - 1] = formatLine({ kind: 'free', start: target.start, end: target.end });
+    });
     close();
   });
   el.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-a]')?.dataset.a;
     if (e.target.closest('a.btn')) close();
     try {
-      if (a === 'pay') {
+      if (a === 'move') {
+        close();
+        openMoveItem(d, it);
+      } else if (a === 'cancel-move') {
+        await saveWeekLines(d, (lines) => (lines[it.line - 1] = formatLine({ ...it, status: 'pending', from: undefined })), `${it.name}: ждёт переноса ⏳`);
+        close();
+      } else if (a === 'other') {
+        close();
+        openFreeItem(d, { day: it.day, start: it.start, end: it.end, kind: 'free', line: null, after: it.line });
+      } else if (a === 'pay') {
         close();
         openPaymentSheet({ id: it.student_id, name: it.name }, null, { amount: it.pay ? it.price - it.pay.covered : it.price });
       } else if (a === 'free') {
-        if (!confirm(`Убрать урок ${it.name} в ${it.start} на этой неделе? Окно станет свободным.`)) return;
-        await saveWeekLines(d, (lines) => (lines[it.line - 1] = formatLine({ kind: 'free', start: it.start, end: it.end })), 'Окно освобождено ✓');
+        if (!confirm(`Убрать урок ${it.name} в ${it.start} на этой неделе? Время станет свободным.`)) return;
+        await saveWeekLines(
+          d,
+          (lines) => {
+            lines[it.line - 1] = formatLine({ kind: 'free', start: it.start, end: it.end });
+            if (origin) lines[origin.line - 1] = formatLine({ ...origin, status: 'pending', to: undefined });
+            if (target) lines[target.line - 1] = formatLine({ kind: 'free', start: target.start, end: target.end });
+          },
+          origin ? 'Перенос убран — исходный урок снова ждёт переноса' : 'Урок убран ✓',
+        );
         close();
       } else if (a === 'practice') {
         close();
@@ -1048,6 +1063,76 @@ function openLessonItem(d, it) {
     } catch (err) {
       if (!(err instanceof AuthError)) toast(err.message);
     }
+  });
+}
+
+/** Перенести урок на другое время этой недели (видно откуда → куда). */
+function openMoveItem(d, it) {
+  const now = Date.now();
+  const [y, mo, dd] = d.week.split('-').map(Number);
+  const dur = toMinutesStr(it.end) - toMinutesStr(it.start);
+  // Свободные окна недели (ещё не прошедшие) — подсказки
+  const wins = d.items
+    .filter((w) => w.kind === 'free')
+    .flatMap((w) => {
+      const out = [];
+      for (let m = toMinutesStr(w.start); m + 60 <= toMinutesStr(w.end); m += 60) out.push({ day: w.day, time: fromMinutesStr(m) });
+      return out;
+    })
+    .filter((w) => new Date(y, mo - 1, dd + w.day, ...w.time.split(':').map(Number)).getTime() > now);
+  const durs = [...new Set([...DURATIONS, dur])].sort((a, b) => a - b);
+  const { el, close } = sheet(
+    `Перенести · ${it.name}`,
+    `<p class="muted" style="margin-top:0">С ${DAY_SHORT[it.day]}, ${it.start}. На старом месте останется пометка «перенесён», а время освободится.</p>
+    ${
+      wins.length
+        ? `<div class="small muted" style="margin-bottom:6px">Свободные окна:</div><div class="chips" id="wins">${wins
+            .slice(0, 30)
+            .map((w) => `<button type="button" class="chip" data-day="${w.day}" data-time="${w.time}">${DAY_SHORT[w.day]} ${w.time}</button>`)
+            .join('')}</div>`
+        : ''
+    }
+    <form id="f-move">
+      <label class="field"><span>День</span><select class="input" name="day">${DAY_NAMES.map((n, i) => `<option value="${i}" ${i === it.day ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      <div class="grid-2">
+        <label class="field"><span>Начало</span><input class="input" type="time" name="start" step="300" value="${it.start}" required></label>
+        <label class="field"><span>Длительность</span><select class="input" name="dur">${durs.map((m) => `<option value="${m}" ${m === dur ? 'selected' : ''}>${durLabel(m)}</option>`).join('')}</select></label>
+      </div>
+      <button class="btn block big" type="submit">Перенести</button>
+    </form>`,
+  );
+  $('#wins', el)?.addEventListener('click', (e) => {
+    const c = e.target.closest('[data-day]');
+    if (!c) return;
+    $$('#wins .chip', el).forEach((x) => x.classList.toggle('on', x === c));
+    $('[name=day]', el).value = c.dataset.day;
+    $('[name=start]', el).value = c.dataset.time;
+  });
+  onSubmit($('#f-move', el), async (f) => {
+    const day = Number(f.day);
+    const start = f.start.slice(0, 5);
+    const mins = Number(f.dur);
+    if (day === it.day && start === it.start) throw new Error('Выбери другое время');
+    await saveWeekLines(
+      d,
+      (lines) => {
+        // 1) старое место: «перенос → день время» (меняем строку на месте — номера строк не сдвигаются)
+        lines[it.line - 1] = formatLine({ ...it, status: 'moved', to: { day, time: start }, from: undefined });
+        // 2) новое место: урок с пометкой «с …»
+        const text = formatLine({
+          kind: 'lesson',
+          start,
+          end: fromMinutesStr(toMinutesStr(start) + mins),
+          name: it.name,
+          price: it.price,
+          status: 'ok',
+          from: it.from ?? { day: it.day, time: it.start },
+        });
+        placeLesson(lines, d.items, day, toMinutesStr(start), mins, text, it.line);
+      },
+      `${it.name}: ${DAY_SHORT[it.day]} ${it.start} → ${DAY_SHORT[day]} ${start} ✓`,
+    );
+    close();
   });
 }
 
@@ -1061,7 +1146,7 @@ function openFreeItem(d, it) {
       ${lessonFields({ day: it.day, start: it.start, end: fromMinutesStr(Math.min(winStart + 60, winEnd > winStart ? Math.max(winStart + 60, 0) : winStart + 60)) })}
       <button class="btn block big mt" type="submit">Поставить урок</button>
     </form>
-    ${it.kind === 'free' ? `<button class="btn ghost block mt" data-a="busy">Отметить как занятое</button>` : `<button class="btn ghost block mt" data-a="unbusy">Сделать свободным</button>`}`,
+    ${it.line == null ? '' : it.kind === 'free' ? `<button class="btn ghost block mt" data-a="busy">Отметить как занятое</button>` : `<button class="btn ghost block mt" data-a="unbusy">Сделать свободным</button>`}`,
   );
   const nameInput = $('[name=name]', el), priceInput = $('[name=price]', el);
   nameInput.addEventListener('change', () => {
@@ -1074,6 +1159,11 @@ function openFreeItem(d, it) {
       (lines) => {
         // Урок + оставшиеся свободные части окна до и после
         const parts = [];
+        if (it.line == null) {
+          // Время отменённого урока: новый урок ставим рядом, отметка об отмене остаётся
+          lines.splice(it.after, 0, lineFromForm(f));
+          return;
+        }
         if (s > winStart) parts.push(formatLine({ kind: 'free', start: it.start, end: fromMinutesStr(s) }));
         parts.push(lineFromForm(f));
         if (e < winEnd) parts.push(formatLine({ kind: 'free', start: fromMinutesStr(e), end: it.end }));
@@ -1119,6 +1209,8 @@ function openAddItem(d) {
 }
 
 function itemPayBadge(d, it) {
+  if (it.status === 'pending') return '<span class="badge amber">⏳ ждёт переноса</span>';
+  if (it.status === 'moved') return `<span class="badge blue">→ ${DAY_SHORT[it.to.day]}, ${it.to.time}</span>`;
   if (it.cancelled) return '<span class="badge">отменён</span>';
   const [y, m, dd] = d.week.split('-').map(Number);
   const startMs = new Date(y, m - 1, dd + it.day, ...it.start.split(':').map(Number)).getTime();
@@ -1175,6 +1267,19 @@ async function pageSchedule(week) {
       <a class="link-btn" href="#/week-text/${d.week}">✏️ Текстом</a>
     </div>`;
 
+  // Отменённые уроки, которые ещё нужно перенести
+  const pending = d.items.filter((it) => it.kind === 'lesson' && it.status === 'pending');
+  if (pending.length) {
+    html += `<div class="card pending-card mt"><b>⏳ Ждут переноса · ${pending.length}</b>
+      <div class="list mt">${pending
+        .map(
+          (it) => `<div class="row" data-line="${it.line}"><div class="row-main"><div class="row-title">${esc(it.name)}</div>
+          <div class="row-sub">был: ${DAY_NAMES[it.day].toLowerCase()}, ${it.start} · ${money(it.price)}</div></div>
+          <div class="row-end"><button class="btn" style="min-height:36px;padding:6px 12px" data-move="${it.line}">↪ Перенести</button></div></div>`,
+        )
+        .join('')}</div></div>`;
+  }
+
   for (let i = 0; i < 7; i++) {
     const day = new Date(from.getFullYear(), from.getMonth(), from.getDate() + i);
     const items = d.items.filter((it) => it.day === i);
@@ -1193,9 +1298,11 @@ async function pageSchedule(week) {
           ? `<div class="list">${visible
               .map((it) =>
                 it.kind === 'lesson'
-                  ? `<div class="row sched ${it.cancelled ? 'cancelled' : ''}" data-line="${it.line}">
+                  ? `<div class="row sched ${it.cancelled ? 'cancelled' : ''} ${it.status === 'pending' ? 'pending' : ''}" data-line="${it.line}">
                     <div class="sched-time"><b>${it.start}</b><span>${it.end}</span></div>
-                    <div class="row-main"><div class="row-title">${esc(it.name)}</div><div class="row-sub">${money(it.price)}</div></div>
+                    <div class="row-main"><div class="row-title">${esc(it.name)}</div><div class="row-sub">${money(it.price)}${
+                      it.from ? ` · <span class="from-mark">↩ с ${DAY_SHORT[it.from.day]}, ${it.from.time}</span>` : ''
+                    }${it.cancelled ? ' · <span class="free-mark">время свободно</span>' : ''}</div></div>
                     <div class="row-end">${itemPayBadge(d, it)}</div></div>`
                   : slotRow(it, `data-line="${it.line}" style="cursor:pointer"`),
               )
@@ -1213,6 +1320,8 @@ async function pageSchedule(week) {
         toast('Неделя как в постоянном графике ✓');
         return render();
       }
+      const mv = e.target.closest('[data-move]');
+      if (mv) return openMoveItem(d, d.items.find((x) => x.line === Number(mv.dataset.move)));
       const r = e.target.closest('[data-line]');
       if (!r) return;
       const it = d.items.find((x) => x.line === Number(r.dataset.line));
@@ -1271,7 +1380,9 @@ async function pageTextEditor(mode, week = null) {
           <li><code>11:00</code> — свободное окно</li>
           <li><code>9:00 — 12:00</code> — свободно с 9:00 до 13:00 (время = начало часа)</li>
           <li><code>15:00 — 16:00 Иван 600</code> — урок на 2 часа, 15:00–17:00</li>
-          <li><code>17:00 Ева 350 отмена</code> — урок отменён (не считается)</li>
+          <li><code>17:00 Ева 350 отмена</code> — отменён без переноса (не считается)</li>
+          <li><code>17:00 Ева 350 перенос</code> — отменён, ждёт переноса</li>
+          <li><code>17:00 Ева 350 перенос → ср 16:00</code> и <code>16:00 Ева 350 с вт 17:00</code> — перенос</li>
           <li><code>9:00 — 12:00 занято</code> — занятое время</li>
           <li>Одно имя = один ученик. Разных с одинаковым именем пиши с буквой: <code>София К.</code></li>
         </ul>

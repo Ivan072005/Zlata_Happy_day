@@ -400,3 +400,11 @@ textarea.tpl {
 .editor-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .editor-bar .btn { flex: 1; }
 #editor[hidden] { display: none !important; }
+
+/* ───────── Переносы ───────── */
+.pending-card { border-color: var(--amber); background: var(--amber-soft); }
+.pending-card .list { background: var(--surface); }
+.row.sched.pending { background: var(--amber-soft); }
+.row.sched.pending .row-title { color: var(--amber); }
+.from-mark { color: var(--blue); font-weight: 600; }
+.free-mark { color: var(--green); }
